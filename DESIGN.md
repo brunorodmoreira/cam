@@ -1,6 +1,6 @@
 # cam — Claude Account Manager
 
-Status: milestone 1 done (resolution, `which`/`use`/`unuse`, config) · Written 2026-11-11
+Status: milestones 1–2 done (resolution, config, token store, `add`/`remove`/`list`, `use`/`unuse`/`which`) · Written 2026-11-11
 
 Pick the Claude Code account **per folder**, the way `.nvmrc` / `.node-version` pick a Node version with fnm. A `.claude-account` file names an account. The nearest one up the folder tree wins. `claude` starts with that account's credentials, and nothing else about your Claude Code setup changes.
 
@@ -58,9 +58,19 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 
 | Command | Does |
 |---|---|
-| `cam add <name> [--email <expected>]` | Prompts for the token with **hidden input** (from `claude setup-token`). Stores it in the Keychain and records the account in config. Then runs the identity check and stores or compares the email. |
+| `cam add <name> [--email <expected>] [--force]` | Prompts for the token with **hidden input** (from `claude setup-token`). Stores it in the Keychain and records the account in config. Then runs the identity check and stores or compares the email *(identity check: M5)*. |
 | `cam remove <name>` | Deletes the Keychain item and the config entry. |
 | `cam list` | Accounts, expected email, token age and default. Never shows tokens. |
+
+### `add`, `remove` and `list` (M2)
+- **Token input:** when stdin is a terminal, `add` uses a hidden prompt. Otherwise it reads all of stdin, so scripts can run `cam add work < file`. The input is trimmed and must match `sk-ant-[A-Za-z0-9_-]+`; that `setup-token` tokens start `sk-ant-oat01-` is *(verify)*. Anything starting `sk-ant-api` is rejected as an API key. Token errors never echo the input.
+- **Validation order:** `add` validates the name (valid, not `none`), the `--email` (one `@`, no spaces) and the config before prompting.
+- **Replacing:** if a token is already stored, `add` refuses unless `--force` is given. A config entry with no stored token, such as one written by hand, is filled in without `--force`. Replacing keeps the entry's existing email unless `--email` is given.
+- **Recording:** `add` stores the token first, then writes the config entry with `token_created` = today (UTC). If the config write fails, a newly stored token is deleted again. A replaced one is kept, since the old token is already gone.
+- **Identity check:** deferred. Checking the email needs a way to run `claude auth status` with the token, which arrives with `whoami`/`doctor` in M5. Until then `--email` only records the expected identity.
+- **`remove`:** checks that the config parses, deletes the token (a failure here leaves the config untouched), then deletes the config entry. If the account was the `default`, it clears `default` and says so on stderr. It works on partial state (only a token, or only an entry), and fails if there's neither.
+- **`list`:** reads only the config, never the store, so it can't trigger a Keychain prompt. It shows one row per account (name, email or `-`, and token date with age) and marks the default. Whether a token is actually stored is left to `doctor`.
+- **Config writes:** via `toml_edit`, so comments and formatting survive. cam refuses to edit a config that doesn't validate and checks the result validates too. It skips the write when nothing changed, writes atomically (temp file + rename), writes through a symlink rather than replacing it, keeps an existing file's permissions, and creates `~/.config/cam/` if needed.
 | `cam use <name> [--dir <d>]` | Writes `.claude-account` in the current directory (or `<d>`, which must exist), containing just `<name>\n` and replacing any existing marker. Validates that the name exists. `cam use none` writes a pass-through marker and needs no account. |
 | `cam unuse [--dir <d>]` | Removes the marker in that folder only, never a parent's. If that folder has none, it exits non-zero and names the nearest parent marker. |
 | `cam which` | Resolved account and its source: env, a file path, the default, or none. |
@@ -116,10 +126,13 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
   - An empty `CAM_CONFIG` counts as unset. The fallback really is `~/.config/cam/config.toml` on macOS as well (not `~/Library/Application Support`), and `XDG_CONFIG_HOME` is not consulted.
   - A missing file is an empty config: no accounts and no default.
   - The config is **validated strictly** every time it's read. Unknown keys are errors, because a typo like `defualt` must not silently mean pass-through. Account names follow the name rule and can't be `none`. `default` must be `none` or a configured account.
-- **Secrets:** the macOS Keychain, generic password, service `cam`, account `<name>`. Put it behind a `SecretStore` trait:
-  - `KeychainStore`: production.
-  - `FileStore`: tests only. Selected by `CAM_TEST_STORE=<dir>`, compiled only with `cfg(test)` or a `test-store` feature.
+- **Secrets:** the macOS Keychain, generic password, service `cam`, account `<name>`. Put it behind a `SecretStore` trait (`contains`, `set`, `delete`; M3 adds `get` for exec):
+  - `KeychainStore`: production, using `security-framework` directly. `keyring` 4 reorganised into per-platform store crates and calls `security-framework` on macOS anyway. `contains` searches attributes only, so checking for a token never reads the secret.
+  - `FileStore`: tests only, one plain file per account. Selected by `CAM_TEST_STORE=<dir>`, compiled only with `cfg(test)` or the `test-store` feature. A self dev-dependency in `Cargo.toml` turns the feature on for `cargo test`, so the `assert_cmd` tests get it, while normal, release and `cargo install` builds don't.
+  - A build without the test store **refuses to run** a store command when `CAM_TEST_STORE` is set, so a misconfigured test fails instead of reaching the real Keychain.
   - Tests never touch the real Keychain.
+  - macOS may ask for Keychain access the first time a newly built (unsigned) `cam` reads an item that an earlier build saved. Choose "Always Allow".
+  - Non-macOS builds compile, but store commands fail with "no token store for this platform yet".
 
 ## Security rules
 
@@ -130,7 +143,7 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 
 ## Crates (suggested)
 
-`clap` (derive), `keyring` (feature `apple-native`, which leaves room for Linux/Windows later) or `security-framework`, `rpassword`, `serde` + `toml`, `dirs`, `anyhow`, `thiserror` (typed errors that tests can match on). For tests: `assert_cmd`, `predicates`, `tempfile`. M1 didn't need `assert_fs`.
+`clap` (derive), `security-framework` (macOS only; Linux/Windows stores can sit behind the same trait later), `rpassword`, `serde` + `toml` for reading, `toml_edit` for writing, `dirs`, `anyhow`, `thiserror` (typed errors that tests can match on). Dates use a small built-in civil-date routine instead of a date crate. For tests: `assert_cmd`, `predicates`, `tempfile`.
 
 ## Testing
 
@@ -154,6 +167,6 @@ v2 ideas: a per-account `mode = "config-dir"` (for Remote Control and connectors
 
 - **Name (settled 2026-11-11):** renamed from `clam` to `cam`. On crates.io, `clam` is a template engine, and [`clam-cli`](https://crates.io/crates/clam-cli) ([jose2kk/clam](https://github.com/jose2kk/clam)) is also a Claude Code profile manager. The crate `cam` is taken by an unrelated camera library, so the package is `cam-cli` and the binary is `cam`. `Cargo.toml` keeps `publish = false` until a release. When Linux support comes, check for a clash with libcamera's `cam` utility.
 - **Logical vs physical cwd:** should the walk-up honour `$PWD` when it points at the current directory, as `pwd -L` does? Then markers above a symlinked folder would apply. M1 uses the physical path.
-- **For M2:** `add`/`remove` must write the config without losing the user's comments, probably with `toml_edit`. A dangling `default` is now a config error, so `remove` of the default account must refuse or clear `default`.
+- **Setting the default:** there's no command for it yet, and `remove` can clear it. Add `cam default <name|none>`, or keep editing `config.toml` by hand?
 - Do the VS Code and JetBrains extensions honour a `claude` on PATH?
 - What does `claude auth status --json` report (`authMethod`, `loginExpiresAt`) when running on `CLAUDE_CODE_OAUTH_TOKEN`?

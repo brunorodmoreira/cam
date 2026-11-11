@@ -1,7 +1,9 @@
-//! End-to-end tests for `which`, `use` and `unuse`.
+//! End-to-end tests for the `cam` binary.
 //!
-//! Every command runs with `CAM_CONFIG` and `HOME` inside a temp dir and with
-//! `CAM_ACCOUNT` removed, so the real config and markers are never touched.
+//! Every command runs with `CAM_CONFIG`, `CAM_TEST_STORE` and `HOME` inside a
+//! temp dir and with `CAM_ACCOUNT` removed, so the real config, markers and
+//! Keychain are never touched. `cargo test` builds the binary with the
+//! `test-store` feature (see Cargo.toml).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,10 +57,24 @@ impl Sandbox {
         cmd.current_dir(cwd)
             .env_remove("CAM_ACCOUNT")
             .env("CAM_CONFIG", &self.config)
+            .env("CAM_TEST_STORE", self.store())
             .env("HOME", self.root.join("home"));
         cmd
     }
+
+    fn store(&self) -> PathBuf {
+        self.root.join("store")
+    }
+
+    /// The token stored for `name` in the test store, if any.
+    fn stored(&self, name: &str) -> Option<String> {
+        fs::read_to_string(self.store().join(name)).ok()
+    }
 }
+
+/// Fake values shaped like tokens. Not real credentials.
+const TOKEN: &str = "sk-ant-oat01-FAKE-cli-test-0001";
+const TOKEN_2: &str = "sk-ant-oat01-FAKE-cli-test-0002";
 
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
@@ -482,4 +498,267 @@ fn usage_errors_are_redacted() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("NOTAREALTOKEN").not());
+}
+
+// --- add ---
+
+#[test]
+fn add_uses_the_test_store_not_the_keychain() {
+    let sb = Sandbox::with_config(None);
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .write_stdin(format!("{TOKEN}\n"))
+        .assert()
+        .success()
+        .stdout(format!(
+            "added work: token saved in the test store at {}\n",
+            sb.store().display()
+        ));
+    assert_eq!(sb.stored("work").as_deref(), Some(TOKEN));
+}
+
+#[test]
+fn add_records_account_and_email() {
+    let sb = Sandbox::with_config(None);
+    sb.cam(&sb.root)
+        .args(["add", "work", "--email", "you@company.com"])
+        .write_stdin(TOKEN)
+        .assert()
+        .success();
+    let config = read(&sb.config);
+    assert!(
+        predicate::str::is_match(
+            r#"^\[accounts\.work\]\nemail = "you@company.com"\ntoken_created = \d{4}-\d{2}-\d{2}\n$"#
+        )
+        .unwrap()
+        .eval(&config),
+        "{config}"
+    );
+
+    // The new account resolves.
+    let marker = sb.marker("w", "work\n");
+    sb.cam(&sb.dir("w"))
+        .arg("which")
+        .assert()
+        .success()
+        .stdout(format!("work (from {})\n", marker.display()));
+}
+
+#[test]
+fn add_keeps_existing_config_comments() {
+    let sb = Sandbox::with_config(Some("# my accounts\n[accounts.personal] # home\n"));
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .write_stdin(TOKEN)
+        .assert()
+        .success();
+    let config = read(&sb.config);
+    assert!(
+        config.starts_with("# my accounts\n[accounts.personal] # home\n"),
+        "{config}"
+    );
+    assert!(config.contains("[accounts.work]"), "{config}");
+}
+
+#[test]
+fn add_twice_needs_force() {
+    let sb = Sandbox::with_config(None);
+    sb.cam(&sb.root)
+        .args(["add", "work", "--email", "you@company.com"])
+        .write_stdin(TOKEN)
+        .assert()
+        .success();
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .write_stdin(TOKEN_2)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(format!(
+            "cam: a token for \"work\" is already stored in the test store at {}\nhint: pass --force to replace it\n",
+            sb.store().display()
+        ));
+    assert_eq!(sb.stored("work").as_deref(), Some(TOKEN));
+
+    sb.cam(&sb.root)
+        .args(["add", "work", "--force"])
+        .write_stdin(TOKEN_2)
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("replaced work: token saved"));
+    assert_eq!(sb.stored("work").as_deref(), Some(TOKEN_2));
+    assert!(read(&sb.config).contains("email = \"you@company.com\""));
+}
+
+#[test]
+fn add_rejects_bad_tokens_without_echoing_them() {
+    let sb = Sandbox::with_config(None);
+    for (input, message) in [
+        ("", "no token entered"),
+        ("hello there", "doesn't look like a token"),
+        (
+            "sk-ant-oat01-FAKE-secret-part with-space",
+            "doesn't look like a token",
+        ),
+        (
+            "sk-ant-api03-FAKE-secret-part",
+            "looks like an Anthropic API key",
+        ),
+    ] {
+        sb.cam(&sb.root)
+            .args(["add", "work"])
+            .write_stdin(input)
+            .assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains(message))
+            .stderr(predicate::str::contains("secret-part").not())
+            .stderr(predicate::str::contains("hello").not());
+    }
+    assert_eq!(sb.stored("work"), None);
+    assert!(!sb.config.exists());
+}
+
+#[test]
+fn add_rejects_bad_names_and_emails() {
+    let sb = Sandbox::with_config(None);
+    for (args, message) in [
+        (vec!["add", "Work"], "invalid account name \"Work\""),
+        (vec!["add", "none"], "\"none\" is reserved"),
+        (
+            vec!["add", "work", "--email", "nope"],
+            "invalid email \"nope\"",
+        ),
+    ] {
+        sb.cam(&sb.root)
+            .args(&args)
+            .write_stdin(TOKEN)
+            .assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains(message));
+    }
+    assert_eq!(sb.stored("work"), None);
+}
+
+#[test]
+fn add_with_broken_config_stores_nothing() {
+    let sb = Sandbox::with_config(Some("not toml"));
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .write_stdin(TOKEN)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot parse"));
+    assert_eq!(sb.stored("work"), None);
+    assert_eq!(read(&sb.config), "not toml");
+}
+
+// --- remove ---
+
+#[test]
+fn remove_deletes_token_and_config_entry() {
+    let sb = Sandbox::with_config(None);
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .write_stdin(TOKEN)
+        .assert()
+        .success();
+    sb.cam(&sb.root)
+        .args(["remove", "work"])
+        .assert()
+        .success()
+        .stdout(format!(
+            "removed work: config entry and token in the test store at {}\n",
+            sb.store().display()
+        ))
+        .stderr("");
+    assert_eq!(sb.stored("work"), None);
+    assert!(!read(&sb.config).contains("work"));
+}
+
+#[test]
+fn remove_default_account_clears_default() {
+    let sb = Sandbox::with_config(Some(&format!("default = \"work\"\n{CONFIG}")));
+    sb.cam(&sb.root)
+        .args(["remove", "work"])
+        .assert()
+        .success()
+        .stdout("removed work: config entry (no token was stored)\n")
+        .stderr("note: work was the default, so `default` is now unset\n");
+    let config = read(&sb.config);
+    assert!(!config.contains("default"), "{config}");
+    assert!(config.contains("[accounts.personal]"), "{config}");
+}
+
+#[test]
+fn remove_unknown_account_fails() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .args(["remove", "ghost"])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr("cam: nothing to remove: \"ghost\" has no config entry and no stored token\n");
+    assert_eq!(read(&sb.config), CONFIG);
+}
+
+// --- list ---
+
+#[test]
+fn list_without_accounts() {
+    let sb = Sandbox::with_config(None);
+    sb.cam(&sb.root)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout("no accounts yet; add one with `cam add <name>`\n");
+}
+
+#[test]
+fn list_shows_accounts_and_default() {
+    let sb = Sandbox::with_config(Some(&format!("default = \"personal\"\n{CONFIG}")));
+    sb.cam(&sb.root)
+        .args(["add", "oss"])
+        .write_stdin(TOKEN)
+        .assert()
+        .success();
+    let output = sb.cam(&sb.root).arg("list").assert().success();
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 4, "{stdout}");
+    assert!(lines[0].starts_with("ACCOUNT"), "{stdout}");
+    assert!(
+        predicate::str::is_match(r"^oss +- +\d{4}-\d{2}-\d{2} \(today\)$")
+            .unwrap()
+            .eval(lines[1]),
+        "{stdout}"
+    );
+    assert!(
+        predicate::str::is_match(r"^personal \(default\) +- +unknown$")
+            .unwrap()
+            .eval(lines[2]),
+        "{stdout}"
+    );
+    assert!(
+        predicate::str::is_match(r"^work +you@company\.com +unknown$")
+            .unwrap()
+            .eval(lines[3]),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn list_never_prints_tokens() {
+    let sb = Sandbox::with_config(None);
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .write_stdin(TOKEN)
+        .assert()
+        .success();
+    sb.cam(&sb.root)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FAKE").not());
 }

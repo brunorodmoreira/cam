@@ -4,7 +4,7 @@ Pick the Claude Code account per folder, the way `.nvmrc` picks a Node version.
 
 Put a `.claude-account` file in a folder. The nearest one up the tree decides which account `claude` starts with. Your settings, plugins, memory and history stay shared across accounts. Only the credential changes.
 
-> **Status: early.** Milestone 1 of 5 is done: resolution, `cam which`, `cam use` and `cam unuse`. cam can't store tokens or launch `claude` yet, so it doesn't switch accounts yet. See the [roadmap](#roadmap).
+> **Status: early.** Milestones 1 and 2 of 5 are done: cam stores tokens in the Keychain and resolves which account applies where. It can't launch `claude` yet, so it doesn't switch accounts yet. See the [roadmap](#roadmap).
 
 ## Why
 
@@ -49,24 +49,44 @@ It isn't on crates.io yet. It will be published as `cam-cli`, because `cam` is t
 
 ## Usage
 
-Until `cam add` lands in milestone 2, declare accounts by hand in `~/.config/cam/config.toml`, or wherever `$CAM_CONFIG` points. This file never holds secrets.
+Add an account. Run `claude setup-token` while logged in to that account, then paste the token it prints when cam asks. The input is hidden, and the token goes straight into the macOS Keychain:
 
-```toml
-default = "personal"          # optional
-
-[accounts.work]
-email = "you@company.com"     # expected identity, checked by `cam doctor` later
-
-[accounts.personal]
+```sh
+cam add work --email you@company.com
+cam add personal
+cam list
 ```
 
-Then:
+```console
+ACCOUNT   EMAIL            TOKEN ADDED
+personal  -                2026-11-11 (today)
+work      you@company.com  2026-11-11 (today)
+```
+
+Then pin accounts to folders:
 
 ```sh
 cam use work                    # write .claude-account here
 cam use none --dir ~/Work/oss   # force pass-through for a subtree
 cam which                       # what applies here, and why
 cam unuse                       # remove the marker in this folder
+```
+
+Other commands:
+
+```sh
+cam add work --force    # replace a token, say when it's close to expiring
+cam remove work         # delete the token and the account
+```
+
+Accounts live in `~/.config/cam/config.toml`, or wherever `$CAM_CONFIG` points. The file never holds secrets, and you can edit it by hand. cam keeps your comments when it writes to it. To use an account wherever no marker applies, set `default`:
+
+```toml
+default = "personal"
+
+[accounts.work]
+email = "you@company.com"
+token_created = 2026-11-11
 ```
 
 ## The marker file
@@ -84,15 +104,15 @@ work
 
 ## Platforms
 
-- **macOS:** the target for v1. Tokens will live in the Keychain.
-- **Linux:** what exists today should work, but it isn't tested. A Linux secret store is a v2 idea.
+- **macOS:** the target for v1. Tokens live in the Keychain, under the service name `cam`.
+- **Linux:** resolution and markers should work, but they aren't tested. `add`/`remove` need a secret store, and a Linux one is a v2 idea.
 - **Windows:** not supported. The launcher relies on Unix `exec` and a symlink shim.
 - **Shells:** any. cam resolves when `claude` starts, not through a shell hook, so bash, zsh and fish behave the same.
 
 ## Roadmap
 
 - [x] 1. Resolution, `which`, `use`/`unuse` and the config file
-- [ ] 2. Token storage in the Keychain, with `add`, `list` and `remove`
+- [x] 2. Token storage in the Keychain, with `add`, `list` and `remove`
 - [ ] 3. `exec`: find the real `claude`, inject the token, warn about conflicting variables
 - [ ] 4. Shim mode: a `claude` → `cam` symlink on PATH, so plain `claude` picks the account
 - [ ] 5. `whoami` and `doctor`: check that each token belongs to the expected email, and warn before it expires
