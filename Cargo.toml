@@ -1,0 +1,26 @@
+[package]
+# The crate `cam` is taken on crates.io, so the package is `cam-cli` and the binary is `cam`.
+name = "cam-cli"
+version = "0.1.0"
+edition = "2024"
+description = "Pick the Claude Code account per folder via .claude-account files"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/brunorodmoreira/cam"
+publish = false
+
+[[bin]]
+name = "cam"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+dirs = "7.0.0"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+toml = "1.2.1"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+predicates = "3.1.4"
+tempfile = "3.27.0"
