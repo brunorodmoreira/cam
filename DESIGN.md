@@ -30,6 +30,8 @@ Observed with CLI 2.1.322 (2026-11-12):
 - `setup-token` says the token is "valid for 1 year".
 - With the token from `cam exec`, `claude auth status --json` reports `authMethod: "oauth_token"`, where the `/login` session reports `"claude.ai"`. So Claude Code uses the token over a `/login` for a different account.
 - In token mode, `auth status` reports **no identity**: no `email`, `orgId`, `orgName`, `subscriptionType` or `planTier`, and `loginExpiresAt` is `null` (shape under Doctor checks).
+- Inside such a session, `/status` shows `Auth token: CLAUDE_CODE_OAUTH_TOKEN` and no account email or org either. The welcome header names "Claude API" instead of the subscription plan. The server accepts the token: prompts get replies.
+- The docs say the token "authenticates with your Claude subscription" but don't say which usage pool it draws from, or why the header says "Claude API". Community issues call that label misleading *(unverified)*. The Usage tab in `/status` should show which pool applies *(verify)*.
 
 ## Resolution
 
@@ -75,7 +77,7 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 | `cam shim install [--dir <d>]` / `uninstall` | Manages the `claude` → `cam` shim symlink. |
 
 ### `add`, `remove` and `list` (M2)
-- **Token input:** when stdin is a terminal, `add` uses a hidden prompt. Otherwise it reads all of stdin, so scripts can run `cam add work < file`. The input is trimmed and must match `sk-ant-[A-Za-z0-9_-]+`; that `setup-token` tokens start `sk-ant-oat01-` is *(verify)*. Anything starting `sk-ant-api` is rejected as an API key. Token errors never echo the input.
+- **Token input:** when stdin is a terminal, `add` uses a hidden prompt. Otherwise it reads all of stdin, so scripts can run `cam add work < file`. The input is trimmed and must match `sk-ant-[A-Za-z0-9_-]+`. `setup-token` tokens start `sk-ant-oat01-` (checked 2026-11-12), but cam doesn't require that, so a new token version still works. Anything starting `sk-ant-api` is rejected as an API key. Token errors never echo the input.
 - **Validation order:** `add` validates the name (valid, not `none`), the `--email` (one `@`, no spaces) and the config before prompting.
 - **Replacing:** if a token is already stored, `add` refuses unless `--force` is given. A config entry with no stored token, such as one written by hand, is filled in without `--force`. Replacing keeps the entry's existing email unless `--email` is given.
 - **Recording:** `add` stores the token first, then writes the config entry with `token_created` = today (UTC). If the config write fails, a newly stored token is deleted again. A replaced one is kept, since the old token is already gone.
@@ -98,7 +100,7 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
   1. Read the token with `SecretStore::get`. If there's no token, or the stored value isn't a valid token, cam fails with a `cam add <name>` or `cam add <name> --force` hint, and `claude` isn't started.
   2. Set `CLAUDE_CODE_OAUTH_TOKEN` and `CAM_ACTIVE_ACCOUNT=<name>`, replacing any inherited values. `CAM_ACTIVE_ACCOUNT` isn't secret; it's for status lines and debugging.
   3. For each of `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` that is set and non-empty, warn on stderr that it outranks the token. Cloud-provider variables and `apiKeyHelper` are left to `doctor`.
-- **Pass-through:** the environment is unchanged, with one exception. If `CAM_ACTIVE_ACCOUNT` is set, cam is running inside a session that a parent cam started, and the `CLAUDE_CODE_OAUTH_TOKEN` it sees is that session's. Both variables are removed, so a pass-through folder really gets the normal `/login`. A `CLAUDE_CODE_OAUTH_TOKEN` that the user exported themselves is left alone.
+- **Pass-through:** the environment is unchanged, with one exception. If `CAM_ACTIVE_ACCOUNT` is set, cam is running inside a session that a parent cam started, and the `CLAUDE_CODE_OAUTH_TOKEN` it sees is that session's. Both variables are removed, so a pass-through folder really gets the normal `/login`. A `CLAUDE_CODE_OAUTH_TOKEN` that the user exported themselves is left alone. In the one session checked, Claude Code kept the token out of its shells (see Security rules), so this matters wherever that doesn't hold.
 - Pass-through never opens the store. It can't cause a Keychain prompt, and it works on platforms without a store.
 - **Order:** loop guard, resolution, discovery, then the token. So a missing `claude` never causes a Keychain prompt.
 - **Recursion guard:** cam sets `CAM_SHIM_DEPTH` to one more than it received (a missing or garbled value counts as 0). It refuses to launch once the incoming value reaches 10. A low limit would break legitimate nesting, because claude's Bash tool running `claude` raises the depth too. A real loop, such as a wrapper script on `PATH` that calls cam again, reaches 10 in milliseconds.
@@ -114,7 +116,7 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 ### Doctor checks
 - The shim dir is on PATH before the real `claude`, and the real `claude` is found.
 - The config parses, and every configured account has a stored token.
-- The identity check per account: the token's account email matches the expected one. This catches a token minted in the wrong browser session. **Open:** `auth status` reports no email in token mode, so M5 needs another source. Candidates: what `/status` shows inside a token session, or the OAuth profile endpoint called from cam (if a `setup-token` token is allowed to read it). If neither works, `doctor` can only check that the token is accepted.
+- The identity check per account: the token's account email matches the expected one. This catches a token minted in the wrong browser session. **Open:** `auth status` reports no email in token mode, so M5 needs another source. `/status` in a token session shows no email or org either. The docs say a `setup-token` token "can only make model requests", so the OAuth profile endpoint will probably refuse it. If nothing works, `doctor` can only check that the token is accepted, plus indirect hints such as which managed settings load. The check matters more than first thought, because `setup-token` enforces only `forceLoginMethod`, not `forceLoginOrgUUID`, so it can mint a token in a different org than the admin intended (https://code.claude.com/docs/en/authentication.md).
 - A token older than about 330 days gets a renewal warning, counted from `token_created`. `loginExpiresAt` is `null` in token mode, so it can't be used.
 - Conflicting variables (`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY`), and `apiKeyHelper` in `~/.claude/settings.json`. All of these outrank the token.
 
@@ -158,7 +160,10 @@ With `CLAUDE_CODE_OAUTH_TOKEN` (through `cam exec`). `loggedIn` may only mean th
 - The token exists only in the Keychain and in the environment of the `claude` child. It never goes into config, logs, argv, or error messages.
 - Redact anything matching `sk-ant-[A-Za-z0-9_-]+` in any output cam produces, including captured stderr from `claude`. Since M1, cam's own stdout, stderr and clap usage errors all go through redaction, which covers a token pasted into a marker or into `CAM_ACCOUNT` by mistake.
 - Marker files contain only names. A hostile repo can at most pick another one of **your own** accounts. A later `doctor` check could flag markers tracked in git.
-- Open question: does Claude Code strip `CLAUDE_CODE_OAUTH_TOKEN` from the environment of the shell commands it runs? Test early with `env | grep -c CLAUDE_CODE_OAUTH_TOKEN` inside a session and document the result.
+- **In the one session checked, the token didn't reach the shell commands Claude Code runs** (2026-11-12, CLI 2.1.322). Inside a `cam exec` session, `! env | grep -c CLAUDE_CODE_OAUTH_TOKEN` printed 0, while `CAM_ACTIVE_ACCOUNT` came through.
+  - It's unknown whether that's Claude Code's default. The session had remote enterprise managed settings, and the docs describe an opt-in, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, that strips credentials from Bash commands, hooks and stdio MCP servers. Its documented list doesn't name `CLAUDE_CODE_OAUTH_TOKEN`. See https://code.claude.com/docs/en/env-vars.md *(verify)*.
+  - If the token does reach shells by default, cam could set the scrub in the child. But the scrub also strips the user's other credentials, such as `NPM_TOKEN`, from those commands, so it would have to be opt-in.
+  - Hooks, MCP servers and the status line command weren't checked.
 
 ## Crates (suggested)
 
