@@ -31,7 +31,7 @@ Observed with CLI 2.1.322 (2026-11-12):
 - With the token from `cam exec`, `claude auth status --json` reports `authMethod: "oauth_token"`, where the `/login` session reports `"claude.ai"`. So Claude Code uses the token over a `/login` for a different account.
 - In token mode, `auth status` reports **no identity**: no `email`, `orgId`, `orgName`, `subscriptionType` or `planTier`, and `loginExpiresAt` is `null` (shape under Doctor checks).
 - Inside such a session, `/status` shows `Auth token: CLAUDE_CODE_OAUTH_TOKEN` and no account email or org either. The welcome header names "Claude API" instead of the subscription plan. The server accepts the token: prompts get replies.
-- The docs say the token "authenticates with your Claude subscription" but don't say which usage pool it draws from, or why the header says "Claude API". Community issues call that label misleading *(unverified)*. The Usage tab in `/status` should show which pool applies *(verify)*.
+- The docs say the token "authenticates with your Claude subscription" but don't say which usage pool it draws from, or why the header says "Claude API". Community issues call that label misleading *(unverified)*. The Usage tab in `/status` doesn't settle it either: it shows a locally computed dollar cost and no plan limits. That's probably because the token can't read the plan; a community report says plan usage needs a profile scope that `setup-token` tokens lack *(unverified)*. Check the org's usage page on claude.ai instead. If token sessions turn out to be metered, the v2 config-dir mode becomes the main way to switch.
 
 ## Resolution
 
