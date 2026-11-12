@@ -142,7 +142,7 @@ work
 - [x] 2. Token storage in the Keychain, with `add`, `list` and `remove`
 - [x] 3. `exec`: find the real `claude`, inject the token, warn about conflicting variables
 - [ ] 4. Shim mode: a `claude` → `cam` symlink on PATH, so plain `claude` picks the account
-- [ ] 5. `whoami` and `doctor`: check that each token belongs to the expected email, and warn before it expires
+- [ ] 5. `whoami` and `doctor`: check that each token works and, where Claude Code makes it possible, that it belongs to the expected email; warn before it expires
 
 ## Trade-offs of token mode
 

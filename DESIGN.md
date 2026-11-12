@@ -26,6 +26,11 @@ Docs facts this design relies on (verified 2026-11-11):
 - `CLAUDE_CODE_OAUTH_TOKEN` outranks `/login` credentials.
 - `CLAUDE_CODE_OAUTH_TOKEN` and `CLAUDE_CONFIG_DIR` are **ignored in project/local `.claude/settings.json`**. That's why an external launcher is needed at all.
 
+Observed with CLI 2.1.322 (2026-11-12):
+- `setup-token` says the token is "valid for 1 year".
+- With the token from `cam exec`, `claude auth status --json` reports `authMethod: "oauth_token"`, where the `/login` session reports `"claude.ai"`. So Claude Code uses the token over a `/login` for a different account.
+- In token mode, `auth status` reports **no identity**: no `email`, `orgId`, `orgName`, `subscriptionType` or `planTier`, and `loginExpiresAt` is `null` (shape under Doctor checks).
+
 ## Resolution
 
 Order (first match wins):
@@ -58,13 +63,13 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 
 | Command | Does |
 |---|---|
-| `cam add <name> [--email <expected>] [--force]` | Prompts for the token with **hidden input** (from `claude setup-token`). Stores it in the Keychain and records the account in config. Then runs the identity check and stores or compares the email *(identity check: M5)*. |
+| `cam add <name> [--email <expected>] [--force]` | Prompts for the token with **hidden input** (from `claude setup-token`). Stores it in the Keychain and records the account in config. An identity check that compares the email is planned for M5, but `auth status` can't provide it in token mode (see Doctor checks). |
 | `cam remove <name>` | Deletes the Keychain item and the config entry. |
 | `cam list` | Accounts, expected email, token age and default. Never shows tokens. |
 | `cam use <name> [--dir <d>]` | Writes `.claude-account` in the current directory (or `<d>`, which must exist), containing just `<name>\n` and replacing any existing marker. Validates that the name exists. `cam use none` writes a pass-through marker and needs no account. |
 | `cam unuse [--dir <d>]` | Removes the marker in that folder only, never a parent's. If that folder has none, it exits non-zero and names the nearest parent marker. |
 | `cam which` | Resolved account and its source: env, a file path, the default, or none. |
-| `cam whoami` | Runs the real `claude auth status --json` with the resolved credential. Prints email, org and plan. |
+| `cam whoami` | Shows the resolved account and its expected email, and whether its token works. Email, org and plan only if a source for them is found (see Doctor checks). |
 | `cam doctor` | Health checks (below). |
 | `cam exec [--] <args…>` | Resolves, then execs the real `claude` with `<args…>` and the account's token. |
 | `cam shim install [--dir <d>]` / `uninstall` | Manages the `claude` → `cam` shim symlink. |
@@ -74,7 +79,7 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 - **Validation order:** `add` validates the name (valid, not `none`), the `--email` (one `@`, no spaces) and the config before prompting.
 - **Replacing:** if a token is already stored, `add` refuses unless `--force` is given. A config entry with no stored token, such as one written by hand, is filled in without `--force`. Replacing keeps the entry's existing email unless `--email` is given.
 - **Recording:** `add` stores the token first, then writes the config entry with `token_created` = today (UTC). If the config write fails, a newly stored token is deleted again. A replaced one is kept, since the old token is already gone.
-- **Identity check:** deferred. Checking the email needs a way to run `claude auth status` with the token, which arrives with `whoami`/`doctor` in M5. Until then `--email` only records the expected identity.
+- **Identity check:** deferred to M5, and `claude auth status` can't do it: in token mode it reports no email. Until a source is found, `--email` only records the expected identity.
 - **`remove`:** checks that the config parses, deletes the token (a failure here leaves the config untouched), then deletes the config entry. If the account was the `default`, it clears `default` and says so on stderr. It works on partial state (only a token, or only an entry), and fails if there's neither.
 - **`list`:** reads only the config, never the store, so it can't trigger a Keychain prompt. It shows one row per account (name, email or `-`, and token date with age) and marks the default. Whether a token is actually stored is left to `doctor`.
 - **Config writes:** via `toml_edit`, so comments and formatting survive. cam refuses to edit a config that doesn't validate and checks the result validates too. It skips the write when nothing changed, writes atomically (temp file + rename), writes through a symlink rather than replacing it, keeps an existing file's permissions, and creates `~/.config/cam/` if needed.
@@ -109,16 +114,22 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 ### Doctor checks
 - The shim dir is on PATH before the real `claude`, and the real `claude` is found.
 - The config parses, and every configured account has a stored token.
-- The identity check per account: `email` from `claude auth status --json` matches the expected email. This catches a token minted in the wrong browser session.
-- A token older than about 330 days gets a renewal warning. Prefer `loginExpiresAt` from `auth status` if token mode reports it *(verify)*.
+- The identity check per account: the token's account email matches the expected one. This catches a token minted in the wrong browser session. **Open:** `auth status` reports no email in token mode, so M5 needs another source. Candidates: what `/status` shows inside a token session, or the OAuth profile endpoint called from cam (if a `setup-token` token is allowed to read it). If neither works, `doctor` can only check that the token is accepted.
+- A token older than about 330 days gets a renewal warning, counted from `token_created`. `loginExpiresAt` is `null` in token mode, so it can't be used.
 - Conflicting variables (`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY`), and `apiKeyHelper` in `~/.claude/settings.json`. All of these outrank the token.
 
-`claude auth status --json` output shape, observed with CLI 2.1.322:
+`claude auth status --json` output shape, observed with CLI 2.1.322. With a `/login` session:
 ```json
 {"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty",
  "configDirectory": "...", "loginExpiresAt": "2026-11-16T15:59:25.959Z",
  "email": "...", "orgId": "...", "orgName": "...",
  "subscriptionType": "max", "planTier": "max_20x", "storedClaudeAiLogin": true}
+```
+With `CLAUDE_CODE_OAUTH_TOKEN` (through `cam exec`). `loggedIn` may only mean that the variable is set, not that the server accepted the token *(verify)*:
+```json
+{"loggedIn": true, "authMethod": "oauth_token", "apiProvider": "firstParty",
+ "analyticsDisabled": false, "projectsDirectory": "...", "configDirectory": "...",
+ "loginExpiresAt": null}
 ```
 
 ## Storage
@@ -177,4 +188,4 @@ v2 ideas: a per-account `mode = "config-dir"` (for Remote Control and connectors
 - **Logical vs physical cwd:** should the walk-up honour `$PWD` when it points at the current directory, as `pwd -L` does? Then markers above a symlinked folder would apply. M1 uses the physical path.
 - **Setting the default:** there's no command for it yet, and `remove` can clear it. Add `cam default <name|none>`, or keep editing `config.toml` by hand?
 - Do the VS Code and JetBrains extensions honour a `claude` on PATH?
-- What does `claude auth status --json` report (`authMethod`, `loginExpiresAt`) when running on `CLAUDE_CODE_OAUTH_TOKEN`?
+- **Answered 2026-11-12:** what `claude auth status --json` reports on `CLAUDE_CODE_OAUTH_TOKEN`. It's `authMethod: "oauth_token"` with no identity and `loginExpiresAt: null`. That leaves a new question: how M5 can tell which account a token belongs to (see Doctor checks).
