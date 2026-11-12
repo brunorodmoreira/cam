@@ -150,7 +150,7 @@ These come from Claude Code itself:
 
 - Sessions on `CLAUDE_CODE_OAUTH_TOKEN` can't use Remote Control or claude.ai connectors.
 - The token lasts about a year.
-- Claude Code can't see your plan in token mode. The startup header says "Claude API", and `/usage` shows a cost estimate instead of your plan's limits. Anthropic's docs say the token authenticates with your Claude subscription, but they don't say which usage pool it draws from. If billing matters to you, check your usage page on claude.ai.
+- Claude Code can't see your plan in token mode. The startup header says "Claude API", and `/usage` shows a dollar estimate instead of your plan's limits. Usage still counts against your subscription. You can watch the plan meters move in Settings → Usage on claude.ai.
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `apiKeyHelper` and cloud-provider variables outrank it.
 
 A per-account config-dir mode is planned for v2 to cover these.

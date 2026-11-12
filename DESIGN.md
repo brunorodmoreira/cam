@@ -31,7 +31,9 @@ Observed with CLI 2.1.322 (2026-11-12):
 - With the token from `cam exec`, `claude auth status --json` reports `authMethod: "oauth_token"`, where the `/login` session reports `"claude.ai"`. So Claude Code uses the token over a `/login` for a different account.
 - In token mode, `auth status` reports **no identity**: no `email`, `orgId`, `orgName`, `subscriptionType` or `planTier`, and `loginExpiresAt` is `null` (shape under Doctor checks).
 - Inside such a session, `/status` shows `Auth token: CLAUDE_CODE_OAUTH_TOKEN` and no account email or org either. The welcome header names "Claude API" instead of the subscription plan. The server accepts the token: prompts get replies.
-- The docs say the token "authenticates with your Claude subscription" but don't say which usage pool it draws from, or why the header says "Claude API". Community issues call that label misleading *(unverified)*. The Usage tab in `/status` doesn't settle it either: it shows a locally computed dollar cost and no plan limits. That's probably because the token can't read the plan; a community report says plan usage needs a profile scope that `setup-token` tokens lack *(unverified)*. Check the org's usage page on claude.ai instead. If token sessions turn out to be metered, the v2 config-dir mode becomes the main way to switch.
+- **Token sessions draw from the subscription's plan limits.** On an organization account with plan limits, a few `cam exec -p` runs moved the account's meters on claude.ai → Settings → Usage: the session went from 1% to 7%, and the week from 0% to 1%. The docs say the same: the token "authenticates with your Claude subscription".
+- The "Claude API" header is only a label, and so is the Usage tab in `/status`. That tab shows a locally computed dollar cost and no plan limits, probably because the token can't read the plan *(unverified)*.
+- That claude.ai usage page also lists one "Claude Code" login with a Manage button. It's likely the token, which would make that the place to revoke it *(verify)*.
 
 ## Resolution
 
