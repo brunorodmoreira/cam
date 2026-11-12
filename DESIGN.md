@@ -1,6 +1,6 @@
 # cam — Claude Account Manager
 
-Status: milestones 1–2 done (resolution, config, token store, `add`/`remove`/`list`, `use`/`unuse`/`which`) · Written 2026-11-11
+Status: milestones 1–3 done (resolution, config, token store, `add`/`remove`/`list`, `use`/`unuse`/`which`, `exec`) · Written 2026-11-11
 
 Pick the Claude Code account **per folder**, the way `.nvmrc` / `.node-version` pick a Node version with fnm. A `.claude-account` file names an account. The nearest one up the folder tree wins. `claude` starts with that account's credentials, and nothing else about your Claude Code setup changes.
 
@@ -61,6 +61,13 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 | `cam add <name> [--email <expected>] [--force]` | Prompts for the token with **hidden input** (from `claude setup-token`). Stores it in the Keychain and records the account in config. Then runs the identity check and stores or compares the email *(identity check: M5)*. |
 | `cam remove <name>` | Deletes the Keychain item and the config entry. |
 | `cam list` | Accounts, expected email, token age and default. Never shows tokens. |
+| `cam use <name> [--dir <d>]` | Writes `.claude-account` in the current directory (or `<d>`, which must exist), containing just `<name>\n` and replacing any existing marker. Validates that the name exists. `cam use none` writes a pass-through marker and needs no account. |
+| `cam unuse [--dir <d>]` | Removes the marker in that folder only, never a parent's. If that folder has none, it exits non-zero and names the nearest parent marker. |
+| `cam which` | Resolved account and its source: env, a file path, the default, or none. |
+| `cam whoami` | Runs the real `claude auth status --json` with the resolved credential. Prints email, org and plan. |
+| `cam doctor` | Health checks (below). |
+| `cam exec [--] <args…>` | Resolves, then execs the real `claude` with `<args…>` and the account's token. |
+| `cam shim install [--dir <d>]` / `uninstall` | Manages the `claude` → `cam` shim symlink. |
 
 ### `add`, `remove` and `list` (M2)
 - **Token input:** when stdin is a terminal, `add` uses a hidden prompt. Otherwise it reads all of stdin, so scripts can run `cam add work < file`. The input is trimmed and must match `sk-ant-[A-Za-z0-9_-]+`; that `setup-token` tokens start `sk-ant-oat01-` is *(verify)*. Anything starting `sk-ant-api` is rejected as an API key. Token errors never echo the input.
@@ -71,32 +78,33 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 - **`remove`:** checks that the config parses, deletes the token (a failure here leaves the config untouched), then deletes the config entry. If the account was the `default`, it clears `default` and says so on stderr. It works on partial state (only a token, or only an entry), and fails if there's neither.
 - **`list`:** reads only the config, never the store, so it can't trigger a Keychain prompt. It shows one row per account (name, email or `-`, and token date with age) and marks the default. Whether a token is actually stored is left to `doctor`.
 - **Config writes:** via `toml_edit`, so comments and formatting survive. cam refuses to edit a config that doesn't validate and checks the result validates too. It skips the write when nothing changed, writes atomically (temp file + rename), writes through a symlink rather than replacing it, keeps an existing file's permissions, and creates `~/.config/cam/` if needed.
-| `cam use <name> [--dir <d>]` | Writes `.claude-account` in the current directory (or `<d>`, which must exist), containing just `<name>\n` and replacing any existing marker. Validates that the name exists. `cam use none` writes a pass-through marker and needs no account. |
-| `cam unuse [--dir <d>]` | Removes the marker in that folder only, never a parent's. If that folder has none, it exits non-zero and names the nearest parent marker. |
-| `cam which` | Resolved account and its source: env, a file path, the default, or none. |
-| `cam whoami` | Runs the real `claude auth status --json` with the resolved credential. Prints email, org and plan. |
-| `cam doctor` | Health checks (below). |
-| `cam exec -- <args…>` | Resolves, then execs the real `claude` with `<args…>`. |
-| `cam shim install [--dir <d>]` / `uninstall` | Manages the `claude` → `cam` shim symlink. |
 
-### Shim (busybox style)
+### `exec` (M3)
+`cam exec` resolves the account for the current directory, then replaces cam with the real `claude` (`std::os::unix::process::CommandExt::exec`), so the TTY, signals and exit codes behave natively. Everything after `exec` goes to `claude` unchanged. `--` is needed only when an argument could be read as cam's own, as in `cam exec -- --help`.
+
+- **Finding the real binary,** on **every** launch and never cached, because `~/.local/bin/claude` is a symlink the auto-updater repoints:
+  1. `CAM_CLAUDE_BIN`, if set and non-empty. It must be an absolute path to an executable file and must not be cam itself. Otherwise it's an error, with no fallback to `PATH`.
+  2. Otherwise the first executable `claude` on `PATH`. Three kinds of entry are skipped:
+     - Relative entries, including empty ones. They mean the current directory, and a `claude` shipped inside a repo must never receive a token.
+     - The shim dir (`~/.local/share/cam/shims`), however it's spelled.
+     - Any `claude` that is cam's own executable. Files are compared by device and inode, so symlinks and hard links both count.
+  - The `PATH` spelling is kept, not canonicalized, as a shell does.
+- **Account resolved:**
+  1. Read the token with `SecretStore::get`. If there's no token, or the stored value isn't a valid token, cam fails with a `cam add <name>` or `cam add <name> --force` hint, and `claude` isn't started.
+  2. Set `CLAUDE_CODE_OAUTH_TOKEN` and `CAM_ACTIVE_ACCOUNT=<name>`, replacing any inherited values. `CAM_ACTIVE_ACCOUNT` isn't secret; it's for status lines and debugging.
+  3. For each of `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` that is set and non-empty, warn on stderr that it outranks the token. Cloud-provider variables and `apiKeyHelper` are left to `doctor`.
+- **Pass-through:** the environment is unchanged, with one exception. If `CAM_ACTIVE_ACCOUNT` is set, cam is running inside a session that a parent cam started, and the `CLAUDE_CODE_OAUTH_TOKEN` it sees is that session's. Both variables are removed, so a pass-through folder really gets the normal `/login`. A `CLAUDE_CODE_OAUTH_TOKEN` that the user exported themselves is left alone.
+- Pass-through never opens the store. It can't cause a Keychain prompt, and it works on platforms without a store.
+- **Order:** loop guard, resolution, discovery, then the token. So a missing `claude` never causes a Keychain prompt.
+- **Recursion guard:** cam sets `CAM_SHIM_DEPTH` to one more than it received (a missing or garbled value counts as 0). It refuses to launch once the incoming value reaches 10. A low limit would break legitimate nesting, because claude's Bash tool running `claude` raises the depth too. A real loop, such as a wrapper script on `PATH` that calls cam again, reaches 10 in milliseconds.
+- **Exit codes:** `claude`'s own, since cam has been replaced. When cam itself fails, it exits with 127 if `claude` can't be found (including a missing `CAM_CLAUDE_BIN` target), 126 if it can't be run, and 1 otherwise. That's the convention `env` and the shell use.
+- Like `execvp`, cam hands a `claude` that the kernel can't run directly (one without a shebang) to `/bin/sh`.
+- The token is **never** placed in argv, because argv is visible in `ps`.
+
+### Shim (busybox style, M4)
 - If `argv[0]`'s basename is `claude`, behave exactly like `cam exec -- <args…>`.
 - `cam shim install` creates `<shim-dir>/claude -> <path to cam>`. The default shim dir is `~/.local/share/cam/shims`. It then prints the PATH line to add. The shim dir must come **before** `~/.local/bin`, where the native installer puts `claude`.
-- **Finding the real binary:**
-  1. Use `CAM_CLAUDE_BIN` if set.
-  2. Otherwise walk `PATH` and skip any entry whose `claude` canonicalizes to cam's own executable or sits in the shim dir.
-  3. The first executable `claude` left wins.
-  - Resolve this on **every** launch. `~/.local/bin/claude` is a symlink the auto-updater repoints, so never cache it.
-- **Recursion guard:** set `CAM_SHIM_DEPTH` in the child environment. If it's already ≥ 1 and discovery finds cam itself, exit with an error rather than loop.
-
-### Exec
-- Account resolved:
-  1. Read the token from the store.
-  2. Set `CLAUDE_CODE_OAUTH_TOKEN` and `CAM_ACTIVE_ACCOUNT=<name>`. The second isn't secret; it's for status lines and debugging.
-  3. Replace the cam process with the real binary (`std::os::unix::process::CommandExt::exec`), so the TTY, signals and exit codes behave natively.
-- Pass-through: exec the real binary with the environment unchanged.
-- If `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` is set, warn on stderr: they outrank the account token.
-- The token is **never** placed in argv, because argv is visible in `ps`.
+- Discovery already skips the shim dir and cam itself, and the recursion guard covers the rest (see `exec`).
 
 ### Doctor checks
 - The shim dir is on PATH before the real `claude`, and the real `claude` is found.
@@ -126,12 +134,12 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
   - An empty `CAM_CONFIG` counts as unset. The fallback really is `~/.config/cam/config.toml` on macOS as well (not `~/Library/Application Support`), and `XDG_CONFIG_HOME` is not consulted.
   - A missing file is an empty config: no accounts and no default.
   - The config is **validated strictly** every time it's read. Unknown keys are errors, because a typo like `defualt` must not silently mean pass-through. Account names follow the name rule and can't be `none`. `default` must be `none` or a configured account.
-- **Secrets:** the macOS Keychain, generic password, service `cam`, account `<name>`. Put it behind a `SecretStore` trait (`contains`, `set`, `delete`; M3 adds `get` for exec):
+- **Secrets:** the macOS Keychain, generic password, service `cam`, account `<name>`. Put it behind a `SecretStore` trait (`contains`, `get`, `set`, `delete`):
   - `KeychainStore`: production, using `security-framework` directly. `keyring` 4 reorganised into per-platform store crates and calls `security-framework` on macOS anyway. `contains` searches attributes only, so checking for a token never reads the secret.
   - `FileStore`: tests only, one plain file per account. Selected by `CAM_TEST_STORE=<dir>`, compiled only with `cfg(test)` or the `test-store` feature. A self dev-dependency in `Cargo.toml` turns the feature on for `cargo test`, so the `assert_cmd` tests get it, while normal, release and `cargo install` builds don't.
   - A build without the test store **refuses to run** a store command when `CAM_TEST_STORE` is set, so a misconfigured test fails instead of reaching the real Keychain.
   - Tests never touch the real Keychain.
-  - macOS may ask for Keychain access the first time a newly built (unsigned) `cam` reads an item that an earlier build saved. Choose "Always Allow".
+  - macOS may ask for Keychain access the first time a newly built (unsigned) `cam` reads an item that an earlier build saved. Choose "Always Allow". Only `get` reads the secret, and only `exec` with an account calls it.
   - Non-macOS builds compile, but store commands fail with "no token store for this platform yet".
 
 ## Security rules
@@ -149,7 +157,7 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 
 - **Resolution unit tests** on temp directory trees: nearest wins, `none` overrides a parent, env beats file, default fallback, invalid or unknown names fail.
 - **PATH discovery:** temp dirs holding fake `claude` scripts, plus a shim symlink earlier on PATH. Assert it skips itself, honours `CAM_CLAUDE_BIN` and trips the recursion guard.
-- **End to end** with `assert_cmd`: a fake `claude` script that prints its argv and whether `CLAUDE_CODE_OAUTH_TOKEN` is set, plus a **hash** of it (never the value). Use `FileStore`.
+- **End to end** with `assert_cmd`: a fake `claude` script prints its path, argv, `CAM_ACTIVE_ACCOUNT` and `CAM_SHIM_DEPTH`. It names which of the known fake tokens it got and never prints the value. The sandbox clears the environment and points `PATH` at its own `bin`, so the real `claude` and any real token are out of reach. Use `FileStore`.
 - **Manual acceptance:** with `.claude-account` = `work` at a work folder, `/status` inside `claude` shows the work account. Outside that folder it shows the personal login.
 
 ## Milestones

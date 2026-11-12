@@ -1,11 +1,13 @@
 //! End-to-end tests for the `cam` binary.
 //!
-//! Every command runs with `CAM_CONFIG`, `CAM_TEST_STORE` and `HOME` inside a
-//! temp dir and with `CAM_ACCOUNT` removed, so the real config, markers and
-//! Keychain are never touched. `cargo test` builds the binary with the
-//! `test-store` feature (see Cargo.toml).
+//! Every command runs with a cleared environment: only `CAM_CONFIG`,
+//! `CAM_TEST_STORE`, `HOME` and `PATH`, all inside a temp dir. So the real
+//! config, markers, Keychain and `claude` are never touched, and no real token
+//! can leak in. `cargo test` builds the binary with the `test-store` feature
+//! (see Cargo.toml).
 
 use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
@@ -33,6 +35,7 @@ impl Sandbox {
             fs::write(&config_path, text).unwrap();
         }
         fs::create_dir(root.join("home")).unwrap();
+        fs::create_dir(root.join("bin")).unwrap();
         Self {
             _tmp: tmp,
             root,
@@ -53,13 +56,43 @@ impl Sandbox {
     }
 
     fn cam(&self, cwd: &Path) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cam"));
+        let mut cmd = Command::new(CAM);
         cmd.current_dir(cwd)
-            .env_remove("CAM_ACCOUNT")
+            .env_clear()
             .env("CAM_CONFIG", &self.config)
             .env("CAM_TEST_STORE", self.store())
-            .env("HOME", self.root.join("home"));
+            .env("HOME", self.root.join("home"))
+            .env("PATH", self.bin());
         cmd
+    }
+
+    /// The sandbox's only `PATH` entry. Empty until a test adds a `claude`.
+    fn bin(&self) -> PathBuf {
+        self.root.join("bin")
+    }
+
+    /// Writes [`FAKE_CLAUDE`] as `<rel>/claude` and returns its path.
+    fn fake_claude(&self, rel: &str) -> PathBuf {
+        self.script(
+            rel,
+            &FAKE_CLAUDE
+                .replace("{TOKEN}", TOKEN)
+                .replace("{TOKEN_2}", TOKEN_2),
+        )
+    }
+
+    /// Writes an executable `<rel>/claude` with `body` and returns its path.
+    fn script(&self, rel: &str, body: &str) -> PathBuf {
+        let path = self.dir(rel).join("claude");
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Stores `token` for `name` in the test store, as `cam add` would.
+    fn store_token(&self, name: &str, token: &str) {
+        fs::create_dir_all(self.store()).unwrap();
+        fs::write(self.store().join(name), token).unwrap();
     }
 
     fn store(&self) -> PathBuf {
@@ -72,9 +105,41 @@ impl Sandbox {
     }
 }
 
+const CAM: &str = env!("CARGO_BIN_EXE_cam");
+
 /// Fake values shaped like tokens. Not real credentials.
 const TOKEN: &str = "sk-ant-oat01-FAKE-cli-test-0001";
 const TOKEN_2: &str = "sk-ant-oat01-FAKE-cli-test-0002";
+
+/// A stand-in for `claude`. It prints its path, its argv and cam's variables.
+/// It names the token it got (`TOKEN`, `TOKEN_2` or `other`) instead of
+/// printing it, and exits with `$FAKE_EXIT`.
+const FAKE_CLAUDE: &str = r#"#!/bin/sh
+echo "claude: $0"
+printf 'argv:'
+for arg in "$@"; do printf ' [%s]' "$arg"; done
+echo
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN+set}" ]; then
+    echo 'token: unset'
+else
+    case "$CLAUDE_CODE_OAUTH_TOKEN" in
+        '{TOKEN}') echo 'token: TOKEN' ;;
+        '{TOKEN_2}') echo 'token: TOKEN_2' ;;
+        *) echo 'token: other' ;;
+    esac
+fi
+echo "account: ${CAM_ACTIVE_ACCOUNT-unset}"
+echo "depth: ${CAM_SHIM_DEPTH-unset}"
+exit "${FAKE_EXIT:-0}"
+"#;
+
+/// What [`FAKE_CLAUDE`] prints.
+fn launched(claude: &Path, argv: &str, token: &str, account: &str, depth: u32) -> String {
+    format!(
+        "claude: {}\nargv:{argv}\ntoken: {token}\naccount: {account}\ndepth: {depth}\n",
+        claude.display()
+    )
+}
 
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
@@ -761,4 +826,297 @@ fn list_never_prints_tokens() {
         .assert()
         .success()
         .stdout(predicate::str::contains("FAKE").not());
+}
+
+// --- exec ---
+
+#[test]
+fn exec_with_account_injects_token() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.store_token("work", TOKEN);
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work/repo"))
+        .args(["exec", "-p", "hello world", "--model", "x"])
+        .assert()
+        .success()
+        .stdout(launched(
+            &claude,
+            " [-p] [hello world] [--model] [x]",
+            "TOKEN",
+            "work",
+            1,
+        ))
+        .stderr("");
+}
+
+#[test]
+fn exec_follows_cam_account() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.store_token("work", TOKEN);
+    sb.store_token("personal", TOKEN_2);
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .arg("exec")
+        .env("CAM_ACCOUNT", "personal")
+        .assert()
+        .success()
+        .stdout(launched(&claude, "", "TOKEN_2", "personal", 1));
+}
+
+#[test]
+fn exec_pass_through_leaves_the_environment_alone() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    // A token the user exported themselves is theirs to keep.
+    sb.cam(&sb.dir("a"))
+        .args(["exec", "--", "--help"])
+        .env("CLAUDE_CODE_OAUTH_TOKEN", TOKEN_2)
+        .assert()
+        .success()
+        .stdout(launched(&claude, " [--help]", "TOKEN_2", "unset", 1));
+}
+
+#[test]
+fn exec_pass_through_drops_a_token_from_a_parent_cam() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.marker("oss", "none\n");
+    // As if run from inside a session that cam started for `work`.
+    sb.cam(&sb.dir("oss"))
+        .arg("exec")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+        .env("CAM_ACTIVE_ACCOUNT", "work")
+        .env("CAM_SHIM_DEPTH", "1")
+        .assert()
+        .success()
+        .stdout(launched(&claude, "", "unset", "unset", 2));
+}
+
+#[test]
+fn exec_nested_session_switches_account() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.store_token("personal", TOKEN_2);
+    sb.marker("home", "personal\n");
+    sb.cam(&sb.dir("home"))
+        .arg("exec")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+        .env("CAM_ACTIVE_ACCOUNT", "work")
+        .env("CAM_SHIM_DEPTH", "1")
+        .assert()
+        .success()
+        .stdout(launched(&claude, "", "TOKEN_2", "personal", 2));
+}
+
+#[test]
+fn exec_passes_the_exit_code_through() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .arg("exec")
+        .env("FAKE_EXIT", "3")
+        .assert()
+        .code(3);
+}
+
+#[test]
+fn exec_without_a_token_fails_before_running_claude() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .arg("exec")
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(format!(
+            "cam: no token stored for \"work\" in the test store at {}\nhint: add one with `cam add work`\n",
+            sb.store().display()
+        ));
+}
+
+#[test]
+fn exec_with_an_invalid_stored_token_fails() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.store_token("work", "junk value");
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .arg("exec")
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains("the token stored for \"work\""))
+        .stderr(predicate::str::contains("cam add work --force"))
+        .stderr(predicate::str::contains("junk").not());
+}
+
+#[test]
+fn exec_unknown_account_fails_before_running_claude() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.marker("x", "nobody\n");
+    sb.cam(&sb.dir("x"))
+        .arg("exec")
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains("unknown account \"nobody\""));
+}
+
+#[test]
+fn exec_warns_about_variables_that_outrank_the_token() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.store_token("work", TOKEN);
+    sb.cam(&sb.root)
+        .arg("exec")
+        .env("CAM_ACCOUNT", "work")
+        .env("ANTHROPIC_API_KEY", "sk-ant-api03-FAKE")
+        .env("ANTHROPIC_AUTH_TOKEN", "")
+        .assert()
+        .success()
+        .stdout(launched(&claude, "", "TOKEN", "work", 1))
+        .stderr(
+            "warning: ANTHROPIC_API_KEY is set and outranks the token for \"work\"; unset it to use that account\n",
+        );
+}
+
+#[test]
+fn exec_pass_through_does_not_warn() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .arg("exec")
+        .env("ANTHROPIC_API_KEY", "sk-ant-api03-FAKE")
+        .assert()
+        .success()
+        .stderr("");
+}
+
+#[test]
+fn exec_skips_cam_and_the_shim_dir_on_path() {
+    let sb = Sandbox::new();
+    let own = sb.dir("own");
+    symlink(CAM, own.join("claude")).unwrap();
+    let shims = sb.script("home/.local/share/cam/shims", "#!/bin/sh\necho shim\n");
+    let shims = shims.parent().unwrap();
+    let claude = sb.fake_claude("bin");
+    let path = std::env::join_paths([&own, shims, &sb.bin()]).unwrap();
+    sb.cam(&sb.root)
+        .arg("exec")
+        .env("PATH", path)
+        .assert()
+        .success()
+        .stdout(launched(&claude, "", "unset", "unset", 1));
+}
+
+#[test]
+fn exec_never_runs_a_claude_from_the_current_directory() {
+    let sb = Sandbox::new();
+    let repo = sb.dir("repo");
+    sb.fake_claude("repo");
+    sb.cam(&repo)
+        .arg("exec")
+        .env("PATH", ":.:bin")
+        .assert()
+        .code(127)
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "cam: cannot find the real `claude` on PATH",
+        ));
+}
+
+#[test]
+fn exec_without_claude_exits_127() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .arg("exec")
+        .assert()
+        .code(127)
+        .stderr(
+            "cam: cannot find the real `claude` on PATH\nhint: install Claude Code, or set CAM_CLAUDE_BIN to its full path\n",
+        );
+}
+
+#[test]
+fn exec_claude_bin_overrides_path() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let chosen = sb.fake_claude("elsewhere");
+    sb.cam(&sb.root)
+        .arg("exec")
+        .env("CAM_CLAUDE_BIN", &chosen)
+        .assert()
+        .success()
+        .stdout(launched(&chosen, "", "unset", "unset", 1));
+}
+
+#[test]
+fn exec_claude_bin_must_not_be_cam() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .arg("exec")
+        .env("CAM_CLAUDE_BIN", CAM)
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("which is cam itself"));
+}
+
+#[test]
+fn exec_claude_bin_must_exist() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .arg("exec")
+        .env("CAM_CLAUDE_BIN", sb.root.join("missing"))
+        .assert()
+        .code(127)
+        .stderr(predicate::str::contains("which is not an executable file"));
+}
+
+#[test]
+fn exec_that_cannot_start_claude_exits_126() {
+    let sb = Sandbox::new();
+    // An execute bit, so discovery picks it, but only for the group, so the
+    // owner's exec fails with "permission denied". (A file the kernel can't
+    // run would just be handed to /bin/sh, as a shell does.)
+    let claude = sb.fake_claude("bin");
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o070)).unwrap();
+    sb.cam(&sb.root)
+        .arg("exec")
+        .assert()
+        .code(126)
+        .stderr(predicate::str::starts_with(format!(
+            "cam: cannot run {}: ",
+            sb.bin().join("claude").display()
+        )));
+}
+
+#[test]
+fn exec_stops_a_loop_back_to_cam() {
+    let sb = Sandbox::new();
+    // A wrapper that hands everything back to cam, so each launch finds it again.
+    sb.script("bin", &format!("#!/bin/sh\nexec '{CAM}' exec -- \"$@\"\n"));
+    sb.cam(&sb.root)
+        .arg("exec")
+        .assert()
+        .code(1)
+        .stderr(
+            "cam: `claude` keeps leading back to cam (CAM_SHIM_DEPTH is 10)\nhint: set CAM_CLAUDE_BIN to the real `claude` binary\n",
+        );
+}
+
+#[test]
+fn exec_help_is_cams() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["exec", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Run the real `claude` with the account that applies here",
+        ));
 }

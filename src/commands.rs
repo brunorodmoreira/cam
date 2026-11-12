@@ -1,9 +1,12 @@
 //! The subcommands.
 
+use std::convert::Infallible;
 use std::env;
+use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs;
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -12,11 +15,13 @@ use toml::value::Date;
 use crate::account::Selection;
 use crate::config::{self, Config};
 use crate::date;
+use crate::discover::{self, ENV_CLAUDE_BIN, Search};
 use crate::error::Error;
+use crate::launch::{self, Credential, ENV_ACTIVE, ENV_DEPTH};
 use crate::marker::{self, FILE_NAME};
 use crate::redact::redact;
 use crate::resolve;
-use crate::store::SecretStore;
+use crate::store::{self, SecretStore};
 use crate::token::Token;
 
 /// Prints a line to stdout, redacted like everything else cam prints.
@@ -27,6 +32,11 @@ fn say(line: impl Display) {
 /// Prints a note to stderr, redacted.
 fn note(line: impl Display) {
     eprintln!("note: {}", redact(&line.to_string()));
+}
+
+/// Prints a warning to stderr, redacted.
+fn warn(line: impl Display) {
+    eprintln!("warning: {}", redact(&line.to_string()));
 }
 
 /// A name `add` and `remove` accept: valid, and not `none`.
@@ -181,6 +191,53 @@ pub fn which(config_path: &Path) -> Result<()> {
     let resolution = resolve::resolve(env_account.as_deref(), &cwd, config_path)?;
     say(resolution);
     Ok(())
+}
+
+/// `cam exec`: resolves the account, then replaces cam with the real
+/// `claude`. Returns only on failure. Pass-through never opens the store, so
+/// it can't trigger a Keychain prompt.
+pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
+    // First, so a loop stops before doing any work.
+    let depth = launch::child_depth(env::var_os(ENV_DEPTH).as_deref())?;
+    let env_account = resolve::env_account()?;
+    let resolution = resolve::resolve(env_account.as_deref(), &current_dir()?, config_path)?;
+
+    let own_exe = env::current_exe().map_err(Error::CurrentExe)?;
+    let shim_dir = discover::default_shim_dir(dirs::home_dir());
+    let (claude_bin, path) = (env::var_os(ENV_CLAUDE_BIN), env::var_os("PATH"));
+    let program = discover::real_claude(&Search {
+        claude_bin: claude_bin.as_deref(),
+        path: path.as_deref(),
+        own_exe: &own_exe,
+        shim_dir: shim_dir.as_deref(),
+    })?;
+
+    let credential = match resolution.selection {
+        Selection::PassThrough => Credential::PassThrough,
+        Selection::Account(name) => {
+            let store = store::open()?;
+            let Some(token) = store.get(&name)? else {
+                return Err(Error::NoToken {
+                    name,
+                    location: store.location(),
+                }
+                .into());
+            };
+            for var in launch::outranking(|key| env::var_os(key)) {
+                warn(format_args!(
+                    "{var} is set and outranks the token for \"{name}\"; unset it to use that account"
+                ));
+            }
+            Credential::Account { name, token }
+        }
+    };
+    let inherited_active = env::var_os(ENV_ACTIVE).is_some();
+    let source = launch::command(&program, args, &credential, inherited_active, depth).exec();
+    Err(Error::Exec {
+        path: program,
+        source,
+    }
+    .into())
 }
 
 pub fn use_account(name: &str, dir: Option<&Path>, config_path: &Path) -> Result<()> {

@@ -22,6 +22,9 @@ pub trait SecretStore {
     fn location(&self) -> String;
     /// Whether a token is stored for `account`, without reading it.
     fn contains(&self, account: &str) -> Result<bool, Error>;
+    /// The token stored for `account`, if any. On macOS this is the call that
+    /// can show a Keychain access prompt.
+    fn get(&self, account: &str) -> Result<Option<Token>, Error>;
     /// Creates or replaces the token for `account`.
     fn set(&self, account: &str, token: &Token) -> Result<(), Error>;
     /// Deletes the token for `account`, returning whether there was one.
@@ -51,6 +54,15 @@ fn test_store(_dir: PathBuf) -> Result<Box<dyn SecretStore>> {
     )
 }
 
+/// Parses a token read back from a store, without ever echoing the bytes.
+#[cfg(any(target_os = "macos", test, feature = "test-store"))]
+fn stored_token(bytes: Vec<u8>, account: &str, location: &str) -> Result<Token, Error> {
+    Token::from_stored(bytes).ok_or_else(|| Error::StoredTokenInvalid {
+        name: account.to_owned(),
+        location: location.to_owned(),
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn platform_store() -> Result<Box<dyn SecretStore>> {
     Ok(Box::new(keychain::KeychainStore))
@@ -65,7 +77,9 @@ fn platform_store() -> Result<Box<dyn SecretStore>> {
 mod keychain {
     use security_framework::base::Error as SecError;
     use security_framework::item::{ItemClass, ItemSearchOptions};
-    use security_framework::passwords::{delete_generic_password, set_generic_password};
+    use security_framework::passwords::{
+        delete_generic_password, get_generic_password, set_generic_password,
+    };
 
     use super::{SERVICE, SecretStore};
     use crate::error::Error;
@@ -95,6 +109,14 @@ mod keychain {
                 Ok(items) => Ok(!items.is_empty()),
                 Err(err) if err.code() == NOT_FOUND => Ok(false),
                 Err(err) => Err(failure("look up", account, err)),
+            }
+        }
+
+        fn get(&self, account: &str) -> Result<Option<Token>, Error> {
+            match get_generic_password(SERVICE, account) {
+                Ok(bytes) => super::stored_token(bytes, account, LOCATION).map(Some),
+                Err(err) if err.code() == NOT_FOUND => Ok(None),
+                Err(err) => Err(failure("read", account, err)),
             }
         }
 
@@ -173,6 +195,14 @@ mod file {
                 .map_err(|err| self.failure("look up", account, err))
         }
 
+        fn get(&self, account: &str) -> Result<Option<Token>, Error> {
+            match fs::read(self.path(account)) {
+                Ok(bytes) => super::stored_token(bytes, account, &self.location()).map(Some),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(err) => Err(self.failure("read", account, err)),
+            }
+        }
+
         fn set(&self, account: &str, token: &Token) -> Result<(), Error> {
             fs::create_dir_all(&self.dir)
                 .and_then(|()| fs::write(self.path(account), token.expose()))
@@ -202,9 +232,14 @@ mod tests {
         let dir = tree.root.join("store");
         let store = FileStore::new(dir.clone());
         assert!(!store.contains("work").unwrap());
+        assert!(store.get("work").unwrap().is_none());
 
         store.set("work", &fake_token(1)).unwrap();
         assert!(store.contains("work").unwrap());
+        assert_eq!(
+            store.get("work").unwrap().unwrap().expose(),
+            fake_token(1).expose()
+        );
         assert_eq!(
             fs::read_to_string(dir.join("work")).unwrap(),
             fake_token(1).expose()
@@ -219,6 +254,16 @@ mod tests {
         assert!(store.delete("work").unwrap());
         assert!(!store.contains("work").unwrap());
         assert!(!store.delete("work").unwrap());
+    }
+
+    #[test]
+    fn file_store_get_rejects_an_invalid_stored_token() {
+        let tree = Tree::new();
+        let dir = tree.dir("store");
+        fs::write(dir.join("work"), "not a token").unwrap();
+        let err = FileStore::new(dir).get("work").unwrap_err();
+        assert!(matches!(err, Error::StoredTokenInvalid { .. }), "{err}");
+        assert!(!err.to_string().contains("not a token"), "{err}");
     }
 
     #[test]

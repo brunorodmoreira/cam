@@ -4,7 +4,7 @@ Pick the Claude Code account per folder, the way `.nvmrc` picks a Node version.
 
 Put a `.claude-account` file in a folder. The nearest one up the tree decides which account `claude` starts with. Your settings, plugins, memory and history stay shared across accounts. Only the credential changes.
 
-> **Status: early.** Milestones 1 and 2 of 5 are done: cam stores tokens in the Keychain and resolves which account applies where. It can't launch `claude` yet, so it doesn't switch accounts yet. See the [roadmap](#roadmap).
+> **Status: early.** Milestones 1–3 of 5 are done: cam stores tokens in the Keychain, works out which account applies where, and `cam exec` starts `claude` with that account. Plain `claude` doesn't switch yet; the shim for that is milestone 4. See the [roadmap](#roadmap).
 
 ## Why
 
@@ -72,6 +72,22 @@ cam which                       # what applies here, and why
 cam unuse                       # remove the marker in this folder
 ```
 
+Then start Claude Code through cam:
+
+```sh
+cam exec                   # claude, with the account that applies here
+cam exec -p "summarize"    # arguments go to claude unchanged
+cam exec -- --help         # use -- when an argument could be cam's own
+```
+
+cam finds the real `claude` on your `PATH` and replaces itself with it, so the terminal, signals and exit code are claude's own. Only that process gets the token. In a pass-through folder, `claude` runs exactly as it would without cam.
+
+Until the shim lands in milestone 4, an alias gets you plain `claude`:
+
+```sh
+alias claude='cam exec --'
+```
+
 Other commands:
 
 ```sh
@@ -89,6 +105,17 @@ email = "you@company.com"
 token_created = 2026-11-11
 ```
 
+### Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `CAM_ACCOUNT` | Overrides markers and the default: an account name, or `none`. |
+| `CAM_CONFIG` | The config file, instead of `~/.config/cam/config.toml`. |
+| `CAM_CLAUDE_BIN` | The absolute path of the real `claude`, if `PATH` lookup isn't what you want. |
+| `CAM_ACTIVE_ACCOUNT` | Set by cam in claude's environment: the account in use, for status lines and scripts. |
+
+If `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set, Claude Code ranks it above the account token, so `cam exec` warns about it.
+
 ## The marker file
 
 `.claude-account` holds one account name:
@@ -105,7 +132,7 @@ work
 ## Platforms
 
 - **macOS:** the target for v1. Tokens live in the Keychain, under the service name `cam`.
-- **Linux:** resolution and markers should work, but they aren't tested. `add`/`remove` need a secret store, and a Linux one is a v2 idea.
+- **Linux:** resolution, markers and pass-through `exec` should work, but they aren't tested. Accounts need a secret store, and a Linux one is a v2 idea.
 - **Windows:** not supported. The launcher relies on Unix `exec` and a symlink shim.
 - **Shells:** any. cam resolves when `claude` starts, not through a shell hook, so bash, zsh and fish behave the same.
 
@@ -113,7 +140,7 @@ work
 
 - [x] 1. Resolution, `which`, `use`/`unuse` and the config file
 - [x] 2. Token storage in the Keychain, with `add`, `list` and `remove`
-- [ ] 3. `exec`: find the real `claude`, inject the token, warn about conflicting variables
+- [x] 3. `exec`: find the real `claude`, inject the token, warn about conflicting variables
 - [ ] 4. Shim mode: a `claude` → `cam` symlink on PATH, so plain `claude` picks the account
 - [ ] 5. `whoami` and `doctor`: check that each token belongs to the expected email, and warn before it expires
 

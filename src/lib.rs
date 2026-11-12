@@ -5,7 +5,9 @@ mod account;
 mod commands;
 mod config;
 mod date;
+mod discover;
 mod error;
+mod launch;
 mod marker;
 mod redact;
 mod resolve;
@@ -14,12 +16,17 @@ mod store;
 mod testutil;
 mod token;
 
+#[cfg(not(unix))]
+compile_error!("cam supports Unix only (macOS first); see DESIGN.md");
+
 use std::env;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use crate::error::Error;
 use crate::redact::redact;
 
 #[derive(Parser)]
@@ -68,6 +75,19 @@ enum Command {
     },
     /// Show which account applies here, and why.
     Which,
+    /// Run the real `claude` with the account that applies here.
+    ///
+    /// Arguments after `exec` go to claude unchanged. Put them after `--` when
+    /// one could be read as cam's own, e.g. `cam exec -- --help`.
+    Exec {
+        /// Arguments for claude.
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
+        args: Vec<OsString>,
+    },
 }
 
 /// Runs the CLI with the process's arguments and environment.
@@ -85,7 +105,7 @@ pub fn run() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("cam: {}", redact(&format!("{err:#}")));
-            ExitCode::FAILURE
+            ExitCode::from(err.downcast_ref::<Error>().map_or(1, Error::exit_code))
         }
     }
 }
@@ -112,5 +132,6 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::Use { name, dir } => commands::use_account(&name, dir.as_deref(), &config_path()?),
         Command::Unuse { dir } => commands::unuse(dir.as_deref()),
         Command::Which => commands::which(&config_path()?),
+        Command::Exec { args } => match commands::exec(&args, &config_path()?)? {},
     }
 }

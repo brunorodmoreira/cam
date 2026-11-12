@@ -35,8 +35,15 @@ impl Token {
         Ok(Self(input.to_owned()))
     }
 
-    /// The raw value. Only for the secret store and, later, the environment
-    /// of the `claude` child.
+    /// A token read back from a store. `None` if the bytes aren't a valid
+    /// token, e.g. a Keychain item edited by hand. The bytes are dropped,
+    /// never echoed.
+    pub fn from_stored(bytes: Vec<u8>) -> Option<Self> {
+        Self::parse(&String::from_utf8(bytes).ok()?).ok()
+    }
+
+    /// The raw value. Only for the secret store and the environment of the
+    /// `claude` child.
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -122,6 +129,15 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    #[test]
+    fn from_stored_round_trips_and_rejects_junk() {
+        let token = Token::from_stored(FAKE.as_bytes().to_vec()).unwrap();
+        assert_eq!(token.expose(), FAKE);
+        assert!(Token::from_stored(Vec::new()).is_none());
+        assert!(Token::from_stored(b"not a token".to_vec()).is_none());
+        assert!(Token::from_stored(vec![0xff, 0xfe]).is_none());
     }
 
     #[test]
