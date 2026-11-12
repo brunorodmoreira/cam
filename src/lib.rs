@@ -11,6 +11,7 @@ mod launch;
 mod marker;
 mod redact;
 mod resolve;
+mod shim;
 mod store;
 #[cfg(test)]
 mod testutil;
@@ -78,7 +79,8 @@ enum Command {
     /// Run the real `claude` with the account that applies here.
     ///
     /// Arguments after `exec` go to claude unchanged. Put them after `--` when
-    /// one could be read as cam's own, e.g. `cam exec -- --help`.
+    /// one could be read as cam's own, e.g. `cam exec -- --help`. The shim
+    /// (`cam shim install`) does this for plain `claude`.
     Exec {
         /// Arguments for claude.
         #[arg(
@@ -88,10 +90,45 @@ enum Command {
         )]
         args: Vec<OsString>,
     },
+    /// Manage the shim that sends plain `claude` through cam.
+    #[command(subcommand)]
+    Shim(ShimCommand),
 }
 
-/// Runs the CLI with the process's arguments and environment.
+#[derive(Subcommand)]
+enum ShimCommand {
+    /// Create a `claude` -> `cam` symlink, and say how to put it first on PATH.
+    ///
+    /// Never edits shell startup files, and never replaces a `claude` that
+    /// isn't a cam shim.
+    Install {
+        /// Put the shim in DIR instead of ~/.local/share/cam/shims.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// Remove the shim. Leaves anything that isn't a cam shim alone.
+    Uninstall {
+        /// Remove the shim from DIR instead of ~/.local/share/cam/shims.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+}
+
+/// Runs the CLI with the process's arguments and environment. Started as
+/// `claude`, through the shim, it's `cam exec` with every argument passed on.
 pub fn run() -> ExitCode {
+    let mut args = env::args_os();
+    if args
+        .next()
+        .is_some_and(|argv0| shim::invoked_as_shim(&argv0))
+    {
+        let args: Vec<OsString> = args.collect();
+        return report(
+            config_path()
+                .map_err(Into::into)
+                .and_then(|config| match commands::exec(&args, &config)? {}),
+        );
+    }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         // Usage errors can echo arguments back, so redact them too.
@@ -101,7 +138,12 @@ pub fn run() -> ExitCode {
         }
         Err(err) => err.exit(),
     };
-    match dispatch(cli.command) {
+    report(dispatch(cli.command))
+}
+
+/// Prints an error, redacted, and picks the exit code.
+fn report(result: anyhow::Result<()>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("cam: {}", redact(&format!("{err:#}")));
@@ -110,8 +152,11 @@ pub fn run() -> ExitCode {
     }
 }
 
+fn config_path() -> Result<PathBuf, Error> {
+    config::path(env::var_os(config::ENV_CONFIG), dirs::home_dir())
+}
+
 fn dispatch(command: Command) -> anyhow::Result<()> {
-    let config_path = || config::path(env::var_os(config::ENV_CONFIG), dirs::home_dir());
     match command {
         Command::Add { name, email, force } => {
             let store = store::open()?;
@@ -133,5 +178,7 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::Unuse { dir } => commands::unuse(dir.as_deref()),
         Command::Which => commands::which(&config_path()?),
         Command::Exec { args } => match commands::exec(&args, &config_path()?)? {},
+        Command::Shim(ShimCommand::Install { dir }) => commands::shim_install(dir.as_deref()),
+        Command::Shim(ShimCommand::Uninstall { dir }) => commands::shim_uninstall(dir.as_deref()),
     }
 }

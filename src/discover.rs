@@ -20,11 +20,6 @@ use crate::error::Error;
 pub const ENV_CLAUDE_BIN: &str = "CAM_CLAUDE_BIN";
 const BINARY: &str = "claude";
 
-/// Where `cam shim install` puts the `claude` → `cam` symlink by default.
-pub fn default_shim_dir(home: Option<PathBuf>) -> Option<PathBuf> {
-    home.map(|home| home.join(".local/share/cam/shims"))
-}
-
 /// What discovery looks at. The caller takes it from the environment.
 pub struct Search<'a> {
     /// `CAM_CLAUDE_BIN`. Empty counts as unset.
@@ -71,13 +66,13 @@ fn from_env(path: &Path, own_exe: &Path) -> Result<PathBuf, Error> {
 }
 
 /// A regular file, after following symlinks, with an execute bit set.
-fn is_executable(path: &Path) -> bool {
+pub fn is_executable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 /// Whether `a` and `b` are the same file or directory, following symlinks.
 /// Comparing device and inode also catches hard links.
-fn same_file(a: &Path, b: &Path) -> bool {
+pub fn same_file(a: &Path, b: &Path) -> bool {
     a == b
         || match (fs::metadata(a), fs::metadata(b)) {
             (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
@@ -281,14 +276,5 @@ mod tests {
             find(link.as_os_str()),
             Err(Error::ClaudeBinIsCam { .. })
         ));
-    }
-
-    #[test]
-    fn default_shim_dir_is_under_home() {
-        assert_eq!(
-            default_shim_dir(Some("/home/me".into())),
-            Some(PathBuf::from("/home/me/.local/share/cam/shims"))
-        );
-        assert_eq!(default_shim_dir(None), None);
     }
 }

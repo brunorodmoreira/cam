@@ -4,7 +4,7 @@ Pick the Claude Code account per folder, the way `.nvmrc` picks a Node version.
 
 Put a `.claude-account` file in a folder. The nearest one up the tree decides which account `claude` starts with. Your settings, plugins, memory and history stay shared across accounts. Only the credential changes.
 
-> **Status: early.** Milestones 1–3 of 5 are done: cam stores tokens in the Keychain, works out which account applies where, and `cam exec` starts `claude` with that account. Plain `claude` doesn't switch yet; the shim for that is milestone 4. See the [roadmap](#roadmap).
+> **Status: early.** Milestones 1–4 of 5 are done: cam stores tokens in the Keychain, works out which account applies where, and starts `claude` with that account, through `cam exec` or a `claude` shim. Checks with `whoami` and `doctor` come next. See the [roadmap](#roadmap).
 
 ## Why
 
@@ -72,7 +72,17 @@ cam which                       # what applies here, and why
 cam unuse                       # remove the marker in this folder
 ```
 
-Then start Claude Code through cam:
+Then make plain `claude` pick the account:
+
+```sh
+cam shim install
+```
+
+This creates `~/.local/share/cam/shims/claude`, a symlink to cam, and prints the line that puts that folder first on your `PATH`, written for your shell. Add it below the line that adds `~/.local/bin`, where Claude Code installs itself, and open a new terminal. From then on, every `claude` goes through cam. cam never edits your shell files itself, and it never replaces a `claude` that isn't its own shim.
+
+cam finds the real `claude` on your `PATH` and replaces itself with it, so the terminal, signals and exit code are claude's own. Only that process gets the token. In a pass-through folder, `claude` runs exactly as it would without cam.
+
+Without the shim, `cam exec` does the same:
 
 ```sh
 cam exec                   # claude, with the account that applies here
@@ -80,13 +90,7 @@ cam exec -p "summarize"    # arguments go to claude unchanged
 cam exec -- --help         # use -- when an argument could be cam's own
 ```
 
-cam finds the real `claude` on your `PATH` and replaces itself with it, so the terminal, signals and exit code are claude's own. Only that process gets the token. In a pass-through folder, `claude` runs exactly as it would without cam.
-
-Until the shim lands in milestone 4, an alias gets you plain `claude`:
-
-```sh
-alias claude='cam exec --'
-```
+If cam ever gets in your way, `CAM_ACCOUNT=none claude` runs Claude Code untouched, even with a broken config. `cam shim uninstall` removes the shim.
 
 Other commands:
 
@@ -141,7 +145,7 @@ work
 - [x] 1. Resolution, `which`, `use`/`unuse` and the config file
 - [x] 2. Token storage in the Keychain, with `add`, `list` and `remove`
 - [x] 3. `exec`: find the real `claude`, inject the token, warn about conflicting variables
-- [ ] 4. Shim mode: a `claude` → `cam` symlink on PATH, so plain `claude` picks the account
+- [x] 4. Shim mode: a `claude` → `cam` symlink on PATH, so plain `claude` picks the account
 - [ ] 5. `whoami` and `doctor`: check that each token works and, where Claude Code makes it possible, that it belongs to the expected email; warn before it expires
 
 ## Trade-offs of token mode

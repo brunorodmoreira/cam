@@ -1,6 +1,6 @@
 # cam — Claude Account Manager
 
-Status: milestones 1–3 done (resolution, config, token store, `add`/`remove`/`list`, `use`/`unuse`/`which`, `exec`) · Written 2026-11-11
+Status: milestones 1–4 done (resolution, config, token store, `add`/`remove`/`list`, `use`/`unuse`/`which`, `exec`, the shim) · Written 2026-11-11
 
 Pick the Claude Code account **per folder**, the way `.nvmrc` / `.node-version` pick a Node version with fnm. A `.claude-account` file names an account. The nearest one up the folder tree wins. `claude` starts with that account's credentials, and nothing else about your Claude Code setup changes.
 
@@ -76,7 +76,7 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 | `cam whoami` | Shows the resolved account and its expected email, and whether its token works. Email, org and plan only if a source for them is found (see Doctor checks). |
 | `cam doctor` | Health checks (below). |
 | `cam exec [--] <args…>` | Resolves, then execs the real `claude` with `<args…>` and the account's token. |
-| `cam shim install [--dir <d>]` / `uninstall` | Manages the `claude` → `cam` shim symlink. |
+| `cam shim install [--dir <d>]` / `cam shim uninstall [--dir <d>]` | Creates or removes the `claude` → `cam` symlink, and says how to put it first on PATH. Never edits shell startup files. |
 
 ### `add`, `remove` and `list` (M2)
 - **Token input:** when stdin is a terminal, `add` uses a hidden prompt. Otherwise it reads all of stdin, so scripts can run `cam add work < file`. The input is trimmed and must match `sk-ant-[A-Za-z0-9_-]+`. `setup-token` tokens start `sk-ant-oat01-` (checked 2026-11-12), but cam doesn't require that, so a new token version still works. Anything starting `sk-ant-api` is rejected as an API key. Token errors never echo the input.
@@ -111,9 +111,21 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 - The token is **never** placed in argv, because argv is visible in `ps`.
 
 ### Shim (busybox style, M4)
-- If `argv[0]`'s basename is `claude`, behave exactly like `cam exec -- <args…>`.
-- `cam shim install` creates `<shim-dir>/claude -> <path to cam>`. The default shim dir is `~/.local/share/cam/shims`. It then prints the PATH line to add. The shim dir must come **before** `~/.local/bin`, where the native installer puts `claude`.
-- Discovery already skips the shim dir and cam itself, and the recursion guard covers the rest (see `exec`).
+- **Shim mode:** if `argv[0]`'s basename is `claude`, cam behaves exactly like `cam exec -- <args…>`. Every argument is passed on unparsed, so `claude --help` and even `claude exec` reach claude. Errors still start with `cam:`, so it's clear which program failed.
+- **Install:** `cam shim install [--dir <d>]` creates `<dir>/claude -> cam`.
+  - The default dir is `~/.local/share/cam/shims`. A relative `--dir` is resolved against the current directory, and the dir is created if needed.
+  - The link is made under a temporary name and renamed into place, so the swap is atomic.
+- **Link target:** the `cam` on `PATH` when it's this same binary, else cam's own executable. The `PATH` spelling, such as `/opt/homebrew/bin/cam` or `~/.cargo/bin/cam`, survives package-manager upgrades, where a canonical path into a versioned directory wouldn't.
+- **Only cam's own links are touched.** `install` and `uninstall` act only on a `<dir>/claude` that is missing or is a symlink to a cam binary: this one, or any file named `cam`, such as an old build, even if the link is dangling. Anything else is an error, so running with `--dir ~/.local/bin` by mistake can't replace the real `claude`.
+- **PATH:** cam never edits shell startup files. After installing, it looks at the current `PATH`:
+  - **Shim dir first:** done. It suggests `hash -r` in case the shell remembers the old `claude`.
+  - **Not on `PATH`:** it prints the line to add, for `$SHELL`: `~/.zshrc`, `~/.bashrc`, fish's `config.fish`, or a POSIX line for anything else. It says to put that line below the one that adds the real `claude`'s dir, which is usually `~/.local/bin`, where the native installer puts `claude`.
+  - **On `PATH` but after another `claude`:** it says to move the line.
+  - Paths under the home directory are printed as `$HOME/…`, so the line can go into dotfiles. If no real `claude` is found yet, it adds a note.
+- **Uninstall:** `cam shim uninstall [--dir <d>]` removes the link, and notes when the dir is still on `PATH`. If there's no shim, it's an error, as with `unuse`.
+- **Loops:** discovery skips the default shim dir and any `claude` that is this cam, so a shim never finds itself. A shim in a custom `--dir` is caught by the same-file check, and the recursion guard covers the rest (see `exec`).
+- **Escape hatch:** `CAM_ACCOUNT=none claude` runs Claude Code untouched, even with a broken config, because `none` never reads it.
+- *(verify)* Claude Code's own `/doctor` or its updater may notice that the `claude` on `PATH` is a symlink to another program.
 
 ### Doctor checks
 - The shim dir is on PATH before the real `claude`, and the real `claude` is found.
@@ -175,6 +187,7 @@ With `CLAUDE_CODE_OAUTH_TOKEN` (through `cam exec`). `loggedIn` may only mean th
 
 - **Resolution unit tests** on temp directory trees: nearest wins, `none` overrides a parent, env beats file, default fallback, invalid or unknown names fail.
 - **PATH discovery:** temp dirs holding fake `claude` scripts, plus a shim symlink earlier on PATH. Assert it skips itself, honours `CAM_CLAUDE_BIN` and trips the recursion guard.
+- **Shim end to end:** run the installed symlink itself, so `argv[0]` really is `claude`, and check that every argument reaches the fake `claude`. Also check that `install` and `uninstall` refuse a real `claude`.
 - **End to end** with `assert_cmd`: a fake `claude` script prints its path, argv, `CAM_ACTIVE_ACCOUNT` and `CAM_SHIM_DEPTH`. It names which of the known fake tokens it got and never prints the value. The sandbox clears the environment and points `PATH` at its own `bin`, so the real `claude` and any real token are out of reach. Use `FileStore`.
 - **Manual acceptance:** with `.claude-account` = `work` at a work folder, `/status` inside `claude` shows the work account. Outside that folder it shows the personal login.
 

@@ -21,6 +21,7 @@ use crate::launch::{self, Credential, ENV_ACTIVE, ENV_DEPTH};
 use crate::marker::{self, FILE_NAME};
 use crate::redact::redact;
 use crate::resolve;
+use crate::shim::{self, Installed};
 use crate::store::{self, SecretStore};
 use crate::token::Token;
 
@@ -202,15 +203,7 @@ pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
     let env_account = resolve::env_account()?;
     let resolution = resolve::resolve(env_account.as_deref(), &current_dir()?, config_path)?;
 
-    let own_exe = env::current_exe().map_err(Error::CurrentExe)?;
-    let shim_dir = discover::default_shim_dir(dirs::home_dir());
-    let (claude_bin, path) = (env::var_os(ENV_CLAUDE_BIN), env::var_os("PATH"));
-    let program = discover::real_claude(&Search {
-        claude_bin: claude_bin.as_deref(),
-        path: path.as_deref(),
-        own_exe: &own_exe,
-        shim_dir: shim_dir.as_deref(),
-    })?;
+    let program = real_claude(&own_exe()?)?;
 
     let credential = match resolution.selection {
         Selection::PassThrough => Credential::PassThrough,
@@ -238,6 +231,93 @@ pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
         source,
     }
     .into())
+}
+
+/// The real `claude`, found the way `exec` finds it.
+fn real_claude(own_exe: &Path) -> Result<PathBuf, Error> {
+    let shim_dir = shim::default_dir(dirs::home_dir());
+    let (claude_bin, path) = (env::var_os(ENV_CLAUDE_BIN), env::var_os("PATH"));
+    discover::real_claude(&Search {
+        claude_bin: claude_bin.as_deref(),
+        path: path.as_deref(),
+        own_exe,
+        shim_dir: shim_dir.as_deref(),
+    })
+}
+
+/// cam's own executable, as an absolute path.
+fn own_exe() -> Result<PathBuf, Error> {
+    let exe = env::current_exe().map_err(Error::CurrentExe)?;
+    if exe.is_absolute() {
+        Ok(exe)
+    } else {
+        fs::canonicalize(exe).map_err(Error::CurrentExe)
+    }
+}
+
+/// `--dir`, made absolute, or the default shim dir.
+fn shim_dir(dir: Option<&Path>) -> Result<PathBuf> {
+    match dir {
+        Some(dir) => {
+            std::path::absolute(dir).with_context(|| format!("cannot open {}", dir.display()))
+        }
+        None => shim::default_dir(dirs::home_dir())
+            .ok_or_else(|| anyhow!("cannot find the home directory; pass --dir")),
+    }
+}
+
+/// `cam shim install`: creates or updates the shim, then says what, if
+/// anything, is left to do on PATH. Never edits shell startup files.
+pub fn shim_install(dir: Option<&Path>) -> Result<()> {
+    let dir = shim_dir(dir)?;
+    let own_exe = own_exe()?;
+    let path = env::var_os("PATH");
+    let target = shim::target(&own_exe, path.as_deref());
+    let link = dir.join(shim::NAME);
+    let (link_shown, target_shown) = (link.display(), target.display());
+    match shim::install(&dir, &target, &own_exe)? {
+        Installed::Created => say(format_args!("installed {link_shown} -> {target_shown}")),
+        Installed::Replaced { previous } => say(format_args!(
+            "replaced {link_shown} -> {target_shown} (it pointed at {})",
+            previous.display()
+        )),
+        Installed::Unchanged => {
+            say(format_args!(
+                "already installed: {link_shown} -> {target_shown}"
+            ));
+        }
+    }
+    let order = shim::path_order(path.as_deref(), &dir, &own_exe);
+    let home = dirs::home_dir();
+    say("");
+    for line in shim::advice(
+        &order,
+        env::var_os("SHELL").as_deref(),
+        &dir,
+        home.as_deref(),
+    ) {
+        say(line);
+    }
+    if let Err(Error::ClaudeNotFound) = real_claude(&own_exe) {
+        note("no real `claude` found on PATH yet; install Claude Code, or set CAM_CLAUDE_BIN");
+    }
+    Ok(())
+}
+
+/// `cam shim uninstall`: removes the shim, if it is one.
+pub fn shim_uninstall(dir: Option<&Path>) -> Result<()> {
+    let dir = shim_dir(dir)?;
+    let removed = shim::uninstall(&dir, &own_exe()?)?;
+    say(format_args!("removed {}", removed.display()));
+    let on_path = env::var_os("PATH")
+        .is_some_and(|path| env::split_paths(&path).any(|entry| discover::same_file(&entry, &dir)));
+    if on_path {
+        note(format_args!(
+            "{} is still on PATH; you can remove that line from your shell's startup file",
+            dir.display()
+        ));
+    }
+    Ok(())
 }
 
 pub fn use_account(name: &str, dir: Option<&Path>, config_path: &Path) -> Result<()> {

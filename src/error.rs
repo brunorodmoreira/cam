@@ -144,6 +144,18 @@ pub enum Error {
     #[error("cannot locate cam's own executable")]
     CurrentExe(#[source] io::Error),
 
+    #[error(
+        "{} already exists and isn't a cam shim, so cam leaves it alone\nhint: remove it yourself, or pick another --dir",
+        path.display()
+    )]
+    ShimOccupied { path: PathBuf },
+
+    #[error("{} isn't a cam shim, so cam leaves it alone", path.display())]
+    NotAShim { path: PathBuf },
+
+    #[error("no shim at {}", path.display())]
+    NoShim { path: PathBuf },
+
     #[error("cannot run {}", path.display())]
     Exec {
         path: PathBuf,

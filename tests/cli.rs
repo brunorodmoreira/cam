@@ -56,7 +56,12 @@ impl Sandbox {
     }
 
     fn cam(&self, cwd: &Path) -> Command {
-        let mut cmd = Command::new(CAM);
+        self.command(Path::new(CAM), cwd)
+    }
+
+    /// `program` (cam, or a shim pointing at it) in the sandbox environment.
+    fn command(&self, program: &Path, cwd: &Path) -> Command {
+        let mut cmd = Command::new(program);
         cmd.current_dir(cwd)
             .env_clear()
             .env("CAM_CONFIG", &self.config)
@@ -97,6 +102,16 @@ impl Sandbox {
 
     fn store(&self) -> PathBuf {
         self.root.join("store")
+    }
+
+    /// The default shim dir under the sandbox's `HOME`.
+    fn shims(&self) -> PathBuf {
+        self.root.join("home/.local/share/cam/shims")
+    }
+
+    /// `PATH` made of these sandbox dirs, in order.
+    fn path(&self, dirs: &[&Path]) -> std::ffi::OsString {
+        std::env::join_paths(dirs).unwrap()
     }
 
     /// The token stored for `name` in the test store, if any.
@@ -1119,4 +1134,252 @@ fn exec_help_is_cams() {
         .stdout(predicate::str::contains(
             "Run the real `claude` with the account that applies here",
         ));
+}
+
+// --- shim ---
+
+#[test]
+fn shim_install_creates_the_shim_and_prints_the_path_line() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .env("SHELL", "/bin/zsh")
+        .assert()
+        .success()
+        .stdout(format!(
+            "installed {shim} -> {CAM}\n\
+             \n\
+             Next, put the shim dir first on PATH. Add this line to the end of ~/.zshrc, below any line that adds {bin}:\n\
+             \n    export PATH=\"$HOME/.local/share/cam/shims:$PATH\"\n\
+             \n\
+             Then open a new terminal. `cam which` shows the account `claude` will use.\n",
+            shim = sb.shims().join("claude").display(),
+            bin = sb.bin().display(),
+        ))
+        .stderr("");
+    assert_eq!(
+        fs::read_link(sb.shims().join("claude")).unwrap(),
+        Path::new(CAM)
+    );
+}
+
+#[test]
+fn shim_runs_claude_with_the_account() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .assert()
+        .success();
+    sb.store_token("work", TOKEN);
+    sb.marker("work", "work\n");
+    // Every argument reaches claude, even ones cam would otherwise parse.
+    sb.command(&sb.shims().join("claude"), &sb.dir("work/repo"))
+        .args(["--help", "exec", "-p", "hi there"])
+        .env("PATH", sb.path(&[&sb.shims(), &sb.bin()]))
+        .assert()
+        .success()
+        .stdout(launched(
+            &claude,
+            " [--help] [exec] [-p] [hi there]",
+            "TOKEN",
+            "work",
+            1,
+        ))
+        .stderr("");
+}
+
+#[test]
+fn shim_pass_through_and_exit_code() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .assert()
+        .success();
+    sb.command(&sb.shims().join("claude"), &sb.root)
+        .env("PATH", sb.path(&[&sb.shims(), &sb.bin()]))
+        .env("FAKE_EXIT", "4")
+        .assert()
+        .code(4)
+        .stdout(launched(&claude, "", "unset", "unset", 1));
+}
+
+#[test]
+fn shim_without_a_real_claude_fails_instead_of_looping() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .assert()
+        .success();
+    sb.command(&sb.shims().join("claude"), &sb.root)
+        .env("PATH", sb.path(&[&sb.shims()]))
+        .assert()
+        .code(127)
+        .stderr(predicate::str::starts_with(
+            "cam: cannot find the real `claude` on PATH",
+        ));
+}
+
+#[test]
+fn shim_install_reports_when_the_shim_is_already_first() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .env("PATH", sb.path(&[&sb.shims(), &sb.bin()]))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Plain `claude` now runs through cam: the shim dir comes first on PATH.\n",
+        ));
+}
+
+#[test]
+fn shim_install_reports_when_the_shim_comes_too_late() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .env("PATH", sb.path(&[&sb.bin(), &sb.shims()]))
+        .env("SHELL", "/usr/bin/fish")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "The shim dir is on PATH, but after {}, so plain `claude` still skips cam.\n",
+            claude.display()
+        )))
+        .stdout(predicate::str::contains(
+            "    set -gx PATH \"$HOME/.local/share/cam/shims\" $PATH\n",
+        ));
+}
+
+#[test]
+fn shim_install_is_idempotent() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .assert()
+        .success();
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(format!(
+            "already installed: {} -> {CAM}\n",
+            sb.shims().join("claude").display()
+        )));
+}
+
+#[test]
+fn shim_install_replaces_an_old_shim() {
+    let sb = Sandbox::new();
+    fs::create_dir_all(sb.shims()).unwrap();
+    let old = sb.root.join("old-build/cam");
+    symlink(&old, sb.shims().join("claude")).unwrap();
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(format!(
+            "replaced {} -> {CAM} (it pointed at {})\n",
+            sb.shims().join("claude").display(),
+            old.display()
+        )));
+}
+
+#[test]
+fn shim_install_points_at_the_path_spelling_of_cam() {
+    let sb = Sandbox::new();
+    let brew = sb.dir("brew/bin");
+    symlink(CAM, brew.join("cam")).unwrap();
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .env("PATH", sb.path(&[&brew, &sb.bin()]))
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_link(sb.shims().join("claude")).unwrap(),
+        brew.join("cam")
+    );
+}
+
+#[test]
+fn shim_install_never_replaces_a_real_claude() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    let before = read(&claude);
+    sb.cam(&sb.root)
+        .args(["shim", "install", "--dir"])
+        .arg(sb.bin())
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(format!(
+            "cam: {} already exists and isn't a cam shim, so cam leaves it alone\nhint: remove it yourself, or pick another --dir\n",
+            claude.display()
+        ));
+    assert_eq!(read(&claude), before);
+}
+
+#[test]
+fn shim_install_notes_a_missing_claude() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .assert()
+        .success()
+        .stderr(
+            "note: no real `claude` found on PATH yet; install Claude Code, or set CAM_CLAUDE_BIN\n",
+        );
+}
+
+#[test]
+fn shim_install_with_relative_dir() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .args(["shim", "install", "--dir", "my-shims"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_link(sb.root.join("my-shims/claude")).unwrap(),
+        Path::new(CAM)
+    );
+}
+
+#[test]
+fn shim_uninstall_removes_only_a_shim() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .assert()
+        .success();
+    sb.cam(&sb.root)
+        .args(["shim", "uninstall"])
+        .env("PATH", sb.path(&[&sb.shims(), &sb.bin()]))
+        .assert()
+        .success()
+        .stdout(format!("removed {}\n", sb.shims().join("claude").display()))
+        .stderr(format!(
+            "note: {} is still on PATH; you can remove that line from your shell's startup file\n",
+            sb.shims().display()
+        ));
+    sb.cam(&sb.root)
+        .args(["shim", "uninstall"])
+        .assert()
+        .code(1)
+        .stderr(format!(
+            "cam: no shim at {}\n",
+            sb.shims().join("claude").display()
+        ));
+
+    let claude = sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["shim", "uninstall", "--dir"])
+        .arg(sb.bin())
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("isn't a cam shim"));
+    assert!(claude.is_file());
 }
