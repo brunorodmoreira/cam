@@ -4,7 +4,7 @@ Pick the Claude Code account per folder, the way `.nvmrc` picks a Node version.
 
 Put a `.claude-account` file in a folder. The nearest one up the tree decides which account `claude` starts with. Your settings, plugins, memory and history stay shared across accounts. Only the credential changes.
 
-> **Status: early.** Milestones 1–4 of 5 are done: cam stores tokens in the Keychain, works out which account applies where, and starts `claude` with that account, through `cam exec` or a `claude` shim. Checks with `whoami` and `doctor` come next. See the [roadmap](#roadmap).
+> **Status: early.** Milestones 1–5 are done: cam stores tokens in the Keychain, works out which account applies where, starts `claude` with that account through `cam exec` or a `claude` shim, and checks the setup with `whoami` and `doctor`. Shell completions and a release come next. See the [roadmap](#roadmap).
 
 ## Why
 
@@ -92,6 +92,35 @@ cam exec -- --help         # use -- when an argument could be cam's own
 
 If cam ever gets in your way, `CAM_ACCOUNT=none claude` runs Claude Code untouched, even with a broken config. `cam shim uninstall` removes the shim.
 
+To check what applies and whether anything will get in the way:
+
+```console
+$ cam whoami
+work (from /Users/me/Work/.claude-account)
+  email:   you@company.com (expected, not verified)
+  token:   stored in the macOS Keychain, added 2026-11-11 (3 days ago), good until about 2027-11-11
+$ cam doctor
+ok    claude: /Users/me/.local/bin/claude
+ok    shim: plain `claude` runs through cam (/Users/me/.local/share/cam/shims/claude)
+ok    config: /Users/me/.config/cam/config.toml, 2 accounts, no default
+ok    account personal: token stored, added 2026-11-02 (12 days ago), good until about 2027-11-02
+ok    account work: token stored, added 2026-11-11 (3 days ago), good until about 2027-11-11
+ok    here: work (from /Users/me/Work/.claude-account)
+ok    environment: nothing outranks cam's tokens
+ok    settings: nothing outranks cam's tokens (1 file checked)
+
+no problems found
+```
+
+`doctor` checks:
+- that the real `claude` is found and the shim comes first on `PATH`;
+- that the config parses and every account has a stored token;
+- token age, with a warning from 330 days on (tokens last about a year);
+- the folder's marker;
+- anything that would make Claude Code ignore cam's token, in your environment and in Claude Code's settings files.
+
+It exits non-zero if a check fails. Neither command reads a token, so neither can cause a Keychain prompt. Neither can tell whose a token is, either: in token mode, Claude Code doesn't report the account's email. So the email stays what you said it would be.
+
 Other commands:
 
 ```sh
@@ -118,7 +147,7 @@ token_created = 2026-11-11
 | `CAM_CLAUDE_BIN` | The absolute path of the real `claude`, if `PATH` lookup isn't what you want. |
 | `CAM_ACTIVE_ACCOUNT` | Set by cam in claude's environment: the account in use, for status lines and scripts. |
 
-If `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set, Claude Code ranks it above the account token, so `cam exec` warns about it.
+If `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set, Claude Code ranks it above the account token, so `cam exec` warns about it. `cam doctor` also looks for cloud-provider switches and `apiKeyHelper`, in the environment and in Claude Code's settings files.
 
 ## The marker file
 
@@ -146,7 +175,10 @@ work
 - [x] 2. Token storage in the Keychain, with `add`, `list` and `remove`
 - [x] 3. `exec`: find the real `claude`, inject the token, warn about conflicting variables
 - [x] 4. Shim mode: a `claude` → `cam` symlink on PATH, so plain `claude` picks the account
-- [ ] 5. `whoami` and `doctor`: check that each token works and, where Claude Code makes it possible, that it belongs to the expected email; warn before it expires
+- [x] 5. `whoami` and `doctor`: what applies here, stored tokens and their age, shim order, and anything that outranks the token
+- [ ] 6. Shell completions and a release
+
+Checking whose a token is, and that the server still accepts it, needs a source Claude Code doesn't offer in token mode. It's an open question in DESIGN.md.
 
 ## Trade-offs of token mode
 

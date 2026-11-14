@@ -129,6 +129,36 @@ fn existing(path: &Path, own_exe: &Path) -> Result<Existing, Error> {
     }
 }
 
+/// Whether `path` is a cam shim, by the rule `install` and `uninstall` use.
+pub fn is_shim(path: &Path, own_exe: &Path) -> bool {
+    matches!(existing(path, own_exe), Ok(Existing::Shim { .. }))
+}
+
+/// What a shell runs for plain `claude`, going by `PATH`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Reaches {
+    /// A cam shim, or cam itself under the name `claude`.
+    Shim(PathBuf),
+    /// Some other `claude`, normally the real one.
+    Other(PathBuf),
+    Nothing,
+}
+
+/// The first executable `claude` on `PATH`, and whether it is cam.
+pub fn first_on_path(path: Option<&OsStr>, own_exe: &Path) -> Reaches {
+    let first = env::split_paths(path.unwrap_or(OsStr::new("")))
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(NAME))
+        .find(|candidate| is_executable(candidate));
+    match first {
+        None => Reaches::Nothing,
+        Some(claude) if is_shim(&claude, own_exe) || same_file(&claude, own_exe) => {
+            Reaches::Shim(claude)
+        }
+        Some(claude) => Reaches::Other(claude),
+    }
+}
+
 /// Where the shim dir sits on `PATH`, relative to the other `claude`s.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PathOrder {
@@ -406,6 +436,41 @@ mod tests {
             }
         );
         assert_eq!(order(&[&empty]), PathOrder::Missing { claude: None });
+    }
+
+    #[test]
+    fn first_on_path_tells_a_shim_from_the_real_claude() {
+        let fx = Fixture::new();
+        install(&fx.shims(), &fx.own_exe, &fx.own_exe).unwrap();
+        let local = fx.tree.dir("local/bin");
+        write_exe(&local.join(NAME));
+        // A shim to an older cam elsewhere, which still exists.
+        let old = fx.tree.dir("old").join(CAM);
+        write_exe(&old);
+        let other_shims = fx.tree.dir("other-shims");
+        symlink(&old, other_shims.join(NAME)).unwrap();
+        // A dangling shim, which a shell would skip.
+        let dangling = fx.tree.dir("dangling");
+        symlink(fx.tree.root.join("gone/cam"), dangling.join(NAME)).unwrap();
+        let empty = fx.tree.dir("empty");
+        let first = |dirs: &[&Path]| {
+            let path = env::join_paths(dirs).unwrap();
+            first_on_path(Some(&path), &fx.own_exe)
+        };
+        let shims = fx.shims();
+        assert_eq!(first(&[&empty, &shims, &local]), Reaches::Shim(fx.link()));
+        assert_eq!(
+            first(&[&dangling, &local, &shims]),
+            Reaches::Other(local.join(NAME))
+        );
+        assert_eq!(
+            first(&[&other_shims, &local]),
+            Reaches::Shim(other_shims.join(NAME))
+        );
+        assert_eq!(first(&[&empty]), Reaches::Nothing);
+        assert!(is_shim(&fx.link(), &fx.own_exe));
+        assert!(!is_shim(&local.join(NAME), &fx.own_exe));
+        assert!(!is_shim(&empty.join(NAME), &fx.own_exe));
     }
 
     #[test]

@@ -4,13 +4,16 @@
 mod account;
 mod commands;
 mod config;
+mod conflict;
 mod date;
 mod discover;
+mod doctor;
 mod error;
 mod launch;
 mod marker;
 mod redact;
 mod resolve;
+mod settings;
 mod shim;
 mod store;
 #[cfg(test)]
@@ -76,6 +79,16 @@ enum Command {
     },
     /// Show which account applies here, and why.
     Which,
+    /// Show the account that applies here, its expected email and its token.
+    ///
+    /// Checks that the token is stored without reading it, so it never
+    /// causes a Keychain prompt.
+    Whoami,
+    /// Check cam's setup, and anything that would keep `claude` from using
+    /// the account cam picks.
+    ///
+    /// Exits non-zero if a check fails. Never reads a token.
+    Doctor,
     /// Run the real `claude` with the account that applies here.
     ///
     /// Arguments after `exec` go to claude unchanged. Put them after `--` when
@@ -177,6 +190,8 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::Use { name, dir } => commands::use_account(&name, dir.as_deref(), &config_path()?),
         Command::Unuse { dir } => commands::unuse(dir.as_deref()),
         Command::Which => commands::which(&config_path()?),
+        Command::Whoami => commands::whoami(&config_path()?),
+        Command::Doctor => commands::doctor(&config_path()?),
         Command::Exec { args } => match commands::exec(&args, &config_path()?)? {},
         Command::Shim(ShimCommand::Install { dir }) => commands::shim_install(dir.as_deref()),
         Command::Shim(ShimCommand::Uninstall { dir }) => commands::shim_uninstall(dir.as_deref()),

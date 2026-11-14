@@ -32,7 +32,8 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Account {
-    /// Expected identity, checked by `doctor`.
+    /// Expected identity. Recorded, not verified: in token mode, Claude Code
+    /// doesn't report whose a token is.
     pub email: Option<String>,
     pub token_created: Option<Datetime>,
 }

@@ -14,13 +14,16 @@ use toml::value::Date;
 
 use crate::account::Selection;
 use crate::config::{self, Config};
+use crate::conflict;
 use crate::date;
 use crate::discover::{self, ENV_CLAUDE_BIN, Search};
+use crate::doctor::{self, TokenAge};
 use crate::error::Error;
-use crate::launch::{self, Credential, ENV_ACTIVE, ENV_DEPTH};
+use crate::launch::{self, Credential, ENV_ACTIVE, ENV_DEPTH, ENV_TOKEN};
 use crate::marker::{self, FILE_NAME};
 use crate::redact::redact;
 use crate::resolve;
+use crate::settings;
 use crate::shim::{self, Installed};
 use crate::store::{self, SecretStore};
 use crate::token::Token;
@@ -191,6 +194,169 @@ pub fn which(config_path: &Path) -> Result<()> {
     let cwd = current_dir()?;
     let resolution = resolve::resolve(env_account.as_deref(), &cwd, config_path)?;
     say(resolution);
+    Ok(())
+}
+
+/// A variable that is set and non-empty.
+fn env_set(key: &str) -> Option<OsString> {
+    env::var_os(key).filter(|value| !value.is_empty())
+}
+
+/// `cam whoami`: the account for this folder, its expected email and its
+/// token. It checks that the token is stored without reading it, so it
+/// can't cause a Keychain prompt. Fails when `claude` here would fail for
+/// lack of a token.
+pub fn whoami(config_path: &Path) -> Result<()> {
+    let env_account = resolve::env_account()?;
+    let resolution = resolve::resolve(env_account.as_deref(), &current_dir()?, config_path)?;
+    say(&resolution);
+    // Printed after the report, so they don't land in the middle of it.
+    let mut warnings = Vec::new();
+    let mut missing = None;
+    match &resolution.selection {
+        // cam drops a token that a parent cam passed, but leaves one the
+        // user exported (see `exec`), and Claude Code ranks it above /login.
+        Selection::PassThrough if env_set(ENV_TOKEN).is_some() && env_set(ENV_ACTIVE).is_none() => {
+            say(format_args!(
+                "  login:   the {ENV_TOKEN} exported in this shell"
+            ));
+        }
+        Selection::PassThrough => {
+            say("  login:   Claude Code's own (`claude auth status` shows which)");
+        }
+        Selection::Account(name) => {
+            let config = Config::load(config_path)?;
+            let account = config
+                .accounts()
+                .get(name)
+                .ok_or_else(|| Error::UnknownAccountArg { name: name.clone() })?;
+            match &account.email {
+                Some(email) => say(format_args!("  email:   {email} (expected, not verified)")),
+                None => say("  email:   not recorded"),
+            }
+            let store = store::open()?;
+            if store.contains(name)? {
+                let today = date::today();
+                let age = doctor::token_age(
+                    account.token_created.and_then(|created| created.date),
+                    today,
+                );
+                say(format_args!(
+                    "  token:   stored in {}, {}",
+                    store.location(),
+                    age.describe(today)
+                ));
+                let problem = match age {
+                    TokenAge::Renew { expires, .. } => Some(format!("expires around {expires}")),
+                    TokenAge::Expired { expires, .. } => {
+                        Some(format!("has probably expired (around {expires})"))
+                    }
+                    TokenAge::Good { .. } | TokenAge::Unknown => None,
+                };
+                if let Some(problem) = problem {
+                    warnings.push(format!(
+                        "the token for \"{name}\" {problem}\n{}",
+                        doctor::renew_hint(name, account.email.as_deref())
+                    ));
+                }
+            } else {
+                missing = Some(Error::NoToken {
+                    name: name.clone(),
+                    location: store.location(),
+                });
+            }
+        }
+    }
+    if let Some(active) = env_set(ENV_ACTIVE) {
+        say(format_args!(
+            "  session: this shell is inside a `claude` that cam started as {}",
+            active.to_string_lossy()
+        ));
+    }
+    for conflict in conflict::in_env(|key| env::var_os(key)) {
+        warnings.push(format!(
+            "{} is set, so {}",
+            conflict.name(),
+            conflict.effect()
+        ));
+    }
+    for warning in warnings {
+        warn(warning);
+    }
+    match missing {
+        Some(err) => Err(err.into()),
+        None => Ok(()),
+    }
+}
+
+/// `cam doctor`: checks cam's setup and what could keep `claude` from using
+/// the account cam picks. Never reads a token, so it can't cause a Keychain
+/// prompt. Fails if any check fails; warnings alone don't.
+pub fn doctor(config_path: &Path) -> Result<()> {
+    let cwd = current_dir()?;
+    let home = dirs::home_dir();
+    let own_exe = own_exe()?;
+    let mut checks = vec![doctor::claude(real_claude(&own_exe))];
+
+    let path = env::var_os("PATH");
+    let shim_dir = shim::default_dir(home.clone());
+    let installed = shim_dir
+        .as_deref()
+        .filter(|dir| shim::is_shim(&dir.join(shim::NAME), &own_exe));
+    checks.push(doctor::shim(
+        &shim::first_on_path(path.as_deref(), &own_exe),
+        installed,
+    ));
+
+    let exists = config_path.try_exists().unwrap_or(true);
+    let loaded = Config::load(config_path);
+    checks.push(doctor::config(config_path, exists, &loaded));
+    if let Ok(config) = &loaded
+        && !config.accounts().is_empty()
+    {
+        match store::open() {
+            Err(err) => checks.push(doctor::Check::new(
+                doctor::Status::Fail,
+                format!("tokens: {err:#}"),
+            )),
+            Ok(store) => {
+                let today = date::today();
+                for (name, account) in config.accounts() {
+                    checks.push(doctor::account(
+                        name,
+                        account,
+                        store.contains(name),
+                        &store.location(),
+                        today,
+                    ));
+                }
+            }
+        }
+    }
+
+    checks.push(doctor::here(resolve::env_account().and_then(|account| {
+        resolve::resolve(account.as_deref(), &cwd, config_path)
+    })));
+    checks.extend(doctor::environment(|key| env::var_os(key)));
+    let config_dir = env::var_os(settings::ENV_CONFIG_DIR);
+    let inspected: Vec<_> = settings::files(config_dir.as_deref(), home.as_deref(), &cwd)
+        .into_iter()
+        .map(|file| {
+            let inspection = settings::inspect(&file);
+            (file, inspection)
+        })
+        .collect();
+    checks.extend(doctor::settings(&inspected));
+
+    for check in &checks {
+        for line in doctor::render(check) {
+            say(line);
+        }
+    }
+    say("");
+    let tally = doctor::tally(&checks);
+    ensure!(tally.problems == 0, "{tally}");
+    say(tally);
     Ok(())
 }
 

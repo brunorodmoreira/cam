@@ -1383,3 +1383,278 @@ fn shim_uninstall_removes_only_a_shim() {
         .stderr(predicate::str::contains("isn't a cam shim"));
     assert!(claude.is_file());
 }
+
+// --- whoami ---
+
+/// Adds `name` with [`TOKEN`] through `cam add`, so it gets today's date.
+fn add(sb: &Sandbox, name: &str) {
+    sb.cam(&sb.root)
+        .args(["add", name])
+        .write_stdin(TOKEN)
+        .assert()
+        .success();
+}
+
+#[test]
+fn whoami_shows_the_account_email_and_token() {
+    let sb = Sandbox::new();
+    add(&sb, "work");
+    let marker = sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work/repo"))
+        .arg("whoami")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(format!(
+            "work (from {})\n  email:   you@company.com (expected, not verified)\n  token:   stored in the test store at {}, added ",
+            marker.display(),
+            sb.store().display()
+        )))
+        .stdout(predicate::str::contains("(today), good until about "))
+        .stdout(predicate::str::contains(TOKEN).not())
+        .stderr("");
+}
+
+#[test]
+fn whoami_fails_without_a_token() {
+    let sb = Sandbox::new();
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .arg("whoami")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("  email:   you@company.com"))
+        .stderr(format!(
+            "cam: no token stored for \"work\" in the test store at {}\nhint: add one with `cam add work`\n",
+            sb.store().display()
+        ));
+}
+
+#[test]
+fn whoami_pass_through() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .arg("whoami")
+        .assert()
+        .success()
+        .stdout(
+            "none (pass-through: no CAM_ACCOUNT, .claude-account or default)\n  \
+             login:   Claude Code's own (`claude auth status` shows which)\n",
+        )
+        .stderr("");
+}
+
+#[test]
+fn whoami_names_an_exported_token_in_pass_through() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .arg("whoami")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  login:   the CLAUDE_CODE_OAUTH_TOKEN exported in this shell\n",
+        ))
+        .stdout(predicate::str::contains(TOKEN).not());
+}
+
+#[test]
+fn whoami_reports_the_session_and_conflicts() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .arg("whoami")
+        .env("CAM_ACCOUNT", "none")
+        .env("CAM_ACTIVE_ACCOUNT", "work")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+        .env("ANTHROPIC_API_KEY", TOKEN_2)
+        .assert()
+        .success()
+        .stdout(
+            "none (pass-through, from CAM_ACCOUNT)\n  \
+             login:   Claude Code's own (`claude auth status` shows which)\n  \
+             session: this shell is inside a `claude` that cam started as work\n",
+        )
+        .stderr(
+            "warning: ANTHROPIC_API_KEY is set, so Claude Code uses it instead of cam's token or your /login\n",
+        );
+}
+
+#[test]
+fn whoami_warns_about_an_expired_token() {
+    let sb = Sandbox::with_config(Some(
+        "[accounts.work]\nemail = \"you@company.com\"\ntoken_created = 2021-03-01\n",
+    ));
+    sb.store_token("work", TOKEN);
+    sb.cam(&sb.root)
+        .arg("whoami")
+        .env("CAM_ACCOUNT", "work")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "probably expired around 2022-03-01\n",
+        ))
+        .stderr(
+            "warning: the token for \"work\" has probably expired (around 2022-03-01)\n\
+             hint: run `claude setup-token` signed in as you@company.com, then `cam add work --force`\n",
+        );
+}
+
+// --- doctor ---
+
+#[test]
+fn doctor_all_good() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .assert()
+        .success();
+    add(&sb, "work");
+    add(&sb, "personal");
+    let marker = sb.marker("work", "work\n");
+    let output = sb
+        .cam(&sb.dir("work/repo"))
+        .arg("doctor")
+        .env("PATH", sb.path(&[&sb.shims(), &sb.bin()]))
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines[0],
+        format!("ok    claude: {}/claude", sb.bin().display())
+    );
+    assert_eq!(
+        lines[1],
+        format!(
+            "ok    shim: plain `claude` runs through cam ({}/claude)",
+            sb.shims().display()
+        )
+    );
+    assert_eq!(
+        lines[2],
+        format!(
+            "ok    config: {}, 2 accounts, no default",
+            sb.config.display()
+        )
+    );
+    assert!(
+        lines[3].starts_with("ok    account personal: token stored, added "),
+        "{stdout}"
+    );
+    assert!(
+        lines[4].starts_with("ok    account work: token stored, added "),
+        "{stdout}"
+    );
+    assert_eq!(
+        lines[5..],
+        [
+            format!("ok    here: work (from {})", marker.display()).as_str(),
+            "ok    environment: nothing outranks cam's tokens",
+            "ok    settings: nothing outranks cam's tokens (no settings files found)",
+            "",
+            "no problems found",
+        ]
+    );
+    assert!(!stdout.contains(TOKEN));
+}
+
+#[test]
+fn doctor_reports_problems_and_fails() {
+    let sb = Sandbox::new();
+    // User settings with a helper, and a repo whose local settings switch
+    // to Bedrock. The values must never be printed.
+    fs::create_dir_all(sb.root.join("home/.claude")).unwrap();
+    fs::write(
+        sb.root.join("home/.claude/settings.json"),
+        format!(
+            r#"{{"apiKeyHelper": "echo {TOKEN}", "env": {{"ANTHROPIC_AUTH_TOKEN": "{TOKEN_2}"}}}}"#
+        ),
+    )
+    .unwrap();
+    sb.dir("repo/.git");
+    fs::create_dir_all(sb.root.join("repo/.claude")).unwrap();
+    fs::write(
+        sb.root.join("repo/.claude/settings.local.json"),
+        r#"{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}"#,
+    )
+    .unwrap();
+    let assert = sb
+        .cam(&sb.dir("repo/src"))
+        .arg("doctor")
+        .env("ANTHROPIC_API_KEY", TOKEN)
+        .assert()
+        .code(1)
+        .stderr("cam: 3 problems, 4 warnings\n");
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let home_settings = sb.root.join("home/.claude/settings.json");
+    let local_settings = sb.root.join("repo/.claude/settings.local.json");
+    for expected in [
+        "fail  claude: cannot find the real `claude` on PATH\n      hint: install Claude Code, or set CAM_CLAUDE_BIN to its full path\n".to_owned(),
+        "info  shim: not installed\n      hint: use `cam exec`, or run `cam shim install`\n".to_owned(),
+        format!("fail  account personal: no token in the test store at {}\n      hint: add one with `cam add personal`\n", sb.store().display()),
+        "fail  account work: no token in ".to_owned(),
+        "ok    here: none (pass-through: no CAM_ACCOUNT, .claude-account or default)\n".to_owned(),
+        "warn  environment: ANTHROPIC_API_KEY is set, so Claude Code uses it instead of cam's token or your /login\n      hint: unset it to use the account cam picks\n".to_owned(),
+        format!("warn  settings: {} sets apiKeyHelper, so Claude Code uses its key instead of cam's token or your /login\n", home_settings.display()),
+        format!("warn  settings: {} sets ANTHROPIC_AUTH_TOKEN in `env`, so Claude Code uses it instead of cam's token or your /login\n", home_settings.display()),
+        format!("warn  settings: {} sets CLAUDE_CODE_USE_BEDROCK in `env`, so Claude Code uses Amazon Bedrock instead of cam's token or your /login\n", local_settings.display()),
+    ] {
+        assert!(stdout.contains(&expected), "missing {expected:?} in:\n{stdout}");
+    }
+    assert!(!stdout.contains("sk-ant-"), "{stdout}");
+}
+
+#[test]
+fn doctor_flags_a_shim_that_comes_too_late() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["shim", "install"])
+        .assert()
+        .success();
+    sb.cam(&sb.root)
+        .arg("doctor")
+        .env("PATH", sb.path(&[&sb.bin(), &sb.shims()]))
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(format!(
+            "warn  shim: installed in {}, but plain `claude` runs {} first, without cam\n      \
+             hint: run `cam shim install` to see the line to add or move\n",
+            sb.shims().display(),
+            claude.display()
+        )));
+}
+
+#[test]
+fn doctor_with_a_broken_config() {
+    let sb = Sandbox::with_config(Some("not toml"));
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .arg("doctor")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(format!(
+            "fail  config: cannot parse {}",
+            sb.config.display()
+        )))
+        .stderr("cam: 2 problems\n");
+}
+
+#[test]
+fn doctor_without_a_config_file() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "info  config: {} doesn't exist yet\n      hint: add an account with `cam add <name>`\n",
+            sb.config.display()
+        )))
+        .stdout(predicate::str::ends_with("\nno problems found\n"));
+}
