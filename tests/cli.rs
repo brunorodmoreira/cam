@@ -1658,3 +1658,114 @@ fn doctor_without_a_config_file() {
         )))
         .stdout(predicate::str::ends_with("\nno problems found\n"));
 }
+
+// --- completions ---
+
+#[test]
+fn completions_fill_in_account_names() {
+    let sb = Sandbox::new();
+    let script = |shell: &str| {
+        let output = sb
+            .cam(&sb.root)
+            .args(["completions", shell])
+            .assert()
+            .success()
+            .stderr("")
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(output).unwrap()
+    };
+    let zsh = script("zsh");
+    assert!(zsh.starts_with("#compdef cam\n"), "{zsh}");
+    assert!(zsh.contains(r#"work\:"you@company.com""#), "{zsh}");
+    assert!(
+        zsh.contains(r#"none\:"pass-through\: Claude Code'\''s own login""#),
+        "{zsh}"
+    );
+    assert!(zsh.contains("personal"), "{zsh}");
+    assert!(script("bash").contains("complete -F _cam"));
+    let fish = script("fish");
+    assert!(fish.contains("complete -c cam"), "{fish}");
+    assert!(fish.contains("__fish_cam_using_subcommand"), "{fish}");
+    assert!(
+        fish.contains(
+            "complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'work' -d 'you@company.com'\n"
+        ),
+        "{fish}"
+    );
+    assert!(
+        fish.contains("complete -c cam -n \"__fish_cam_using_subcommand completions\" -f -a 'zsh'"),
+        "{fish}"
+    );
+}
+
+#[test]
+fn completions_with_a_broken_config_still_work() {
+    let sb = Sandbox::with_config(Some("not toml"));
+    sb.cam(&sb.root)
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("complete -F _cam"))
+        .stdout(predicate::str::contains("personal").not())
+        .stderr("");
+}
+
+/// What bash's completion for `cam` offers for the last of `words`.
+fn bash_completes(script: &Path, words: &[&str]) -> Vec<String> {
+    let output = std::process::Command::new("/bin/bash")
+        .arg("-c")
+        .arg(
+            r#"eval "$(cat "$1")"; shift
+               COMP_WORDS=("$@"); COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))
+               COMP_LINE="$*"; COMP_POINT=${#COMP_LINE}
+               _cam cam "${COMP_WORDS[COMP_CWORD]}" "${COMP_WORDS[COMP_CWORD-1]}"
+               printf '%s\n' "${COMPREPLY[@]}""#,
+        )
+        .arg("_")
+        .arg(script)
+        .args(words)
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn bash_completes_account_names() {
+    let sb = Sandbox::new();
+    let output = sb
+        .cam(&sb.root)
+        .args(["completions", "bash"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let script = sb.root.join("cam.bash");
+    fs::write(&script, output).unwrap();
+
+    assert_eq!(bash_completes(&script, &["cam", "use", "w"]), ["work"]);
+    let use_values = bash_completes(&script, &["cam", "use", ""]);
+    for name in ["personal", "work", "none"] {
+        assert!(
+            use_values.iter().any(|value| value == name),
+            "{use_values:?}"
+        );
+    }
+    let remove_values = bash_completes(&script, &["cam", "remove", ""]);
+    assert!(remove_values.iter().any(|value| value == "personal"));
+    assert!(!remove_values.iter().any(|value| value == "none"));
+    // Subcommands come in their help order.
+    let subcommands = bash_completes(&script, &["cam", ""]);
+    let position = |name: &str| subcommands.iter().position(|value| value == name);
+    assert!(position("add") < position("remove"), "{subcommands:?}");
+    assert!(position("use") < position("which"), "{subcommands:?}");
+}

@@ -3,6 +3,7 @@
 
 mod account;
 mod commands;
+mod completions;
 mod config;
 mod conflict;
 mod date;
@@ -28,7 +29,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 
 use crate::error::Error;
 use crate::redact::redact;
@@ -68,13 +69,13 @@ enum Command {
         /// A configured account, or `none` to force pass-through from this folder down.
         name: String,
         /// Write the marker in DIR instead of the current directory.
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
         dir: Option<PathBuf>,
     },
     /// Remove the .claude-account marker from a folder.
     Unuse {
         /// Remove the marker in DIR instead of the current directory.
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
         dir: Option<PathBuf>,
     },
     /// Show which account applies here, and why.
@@ -106,6 +107,19 @@ enum Command {
     /// Manage the shim that sends plain `claude` through cam.
     #[command(subcommand)]
     Shim(ShimCommand),
+    /// Print a shell completion script.
+    ///
+    /// Account names are filled in when the script is generated, so load it
+    /// from your shell's startup file instead of saving it to a file:
+    ///
+    ///   zsh, in ~/.zshrc (after compinit):   eval "$(cam completions zsh)"
+    ///   bash, in ~/.bashrc:                  eval "$(cam completions bash)"
+    ///   fish, in ~/.config/fish/config.fish: cam completions fish | source
+    #[command(verbatim_doc_comment, about = "Print a shell completion script")]
+    Completions {
+        /// The shell to write the script for.
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -116,13 +130,13 @@ enum ShimCommand {
     /// isn't a cam shim.
     Install {
         /// Put the shim in DIR instead of ~/.local/share/cam/shims.
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
         dir: Option<PathBuf>,
     },
     /// Remove the shim. Leaves anything that isn't a cam shim alone.
     Uninstall {
         /// Remove the shim from DIR instead of ~/.local/share/cam/shims.
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
         dir: Option<PathBuf>,
     },
 }
@@ -195,5 +209,13 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::Exec { args } => match commands::exec(&args, &config_path()?)? {},
         Command::Shim(ShimCommand::Install { dir }) => commands::shim_install(dir.as_deref()),
         Command::Shim(ShimCommand::Uninstall { dir }) => commands::shim_uninstall(dir.as_deref()),
+        Command::Completions { shell } => {
+            let config = config_path().ok();
+            print!(
+                "{}",
+                completions::script(shell, Cli::command(), config.as_deref())
+            );
+            Ok(())
+        }
     }
 }

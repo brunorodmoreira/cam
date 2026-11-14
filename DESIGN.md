@@ -1,6 +1,6 @@
 # cam — Claude Account Manager
 
-Status: milestones 1–5 done (resolution, config, token store, `add`/`remove`/`list`, `use`/`unuse`/`which`, `exec`, the shim, `whoami`/`doctor`) · Written 2026-11-11
+Status: milestones 1–5 done (resolution, config, token store, `add`/`remove`/`list`, `use`/`unuse`/`which`, `exec`, the shim, `whoami`/`doctor`), plus shell completions from M6. No release yet. · Written 2026-11-11
 
 Pick the Claude Code account **per folder**, the way `.nvmrc` / `.node-version` pick a Node version with fnm. A `.claude-account` file names an account. The nearest one up the folder tree wins. `claude` starts with that account's credentials, and nothing else about your Claude Code setup changes.
 
@@ -77,6 +77,7 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 | `cam doctor` | Health checks (below). Never reads a token. |
 | `cam exec [--] <args…>` | Resolves, then execs the real `claude` with `<args…>` and the account's token. |
 | `cam shim install [--dir <d>]` / `cam shim uninstall [--dir <d>]` | Creates or removes the `claude` → `cam` symlink, and says how to put it first on PATH. Never edits shell startup files. |
+| `cam completions <shell>` | Prints a completion script for bash, zsh, fish, elvish or PowerShell, with account names filled in. |
 
 ### `add`, `remove` and `list` (M2)
 - **Token input:** when stdin is a terminal, `add` uses a hidden prompt. Otherwise it reads all of stdin, so scripts can run `cam add work < file`. The input is trimmed and must match `sk-ant-[A-Za-z0-9_-]+`. `setup-token` tokens start `sk-ant-oat01-` (checked 2026-11-12), but cam doesn't require that, so a new token version still works. Anything starting `sk-ant-api` is rejected as an API key. Token errors never echo the input.
@@ -132,6 +133,15 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 - Inside a cam session (`CAM_ACTIVE_ACCOUNT` set), it adds which account that session runs as.
 - Warns on stderr about a token due for renewal, and about anything in the environment that outranks the token. Warnings come after the report, not in the middle of it.
 - It checks the token with `SecretStore::contains`, which never reads it, so it can't cause a Keychain prompt. With no token stored, it prints the report, then fails like `exec` would, with the `cam add` hint.
+
+### Completions (M6)
+- **Static scripts from `clap_complete`,** not its run-time mode. That mode sits behind an `unstable-dynamic` feature whose API can change between minor versions. With static scripts, nothing runs cam while completing.
+- **Account names are baked in** when the script is generated, as the values of `use` (plus `none`) and `remove`. That's done on a copy of the command used only for generation, so parsing still accepts any name. An email becomes the value's description when it uses only `[A-Za-z0-9@._%+-]`. clap escapes help text, but the config is hand-editable, so anything else is left out instead of trusted to escaping.
+- **Loaded at shell start,** with `eval "$(cam completions zsh)"` and the like, rather than saved to a file. New accounts appear in the next shell. `eval` rather than `source <(…)`, because macOS's bash 3.2 can't source a process substitution.
+- **Quiet:** a missing or broken config gives a script without names and no error, since this runs at every shell start.
+- **fish:** clap's fish script completes no positional values, so cam appends one `complete` line per value, using the `__fish_cam_using_subcommand` function clap's script defines. Not tried in a real fish *(verify)*.
+- Tested: in bash 3.2, by calling the completion function with `COMP_WORDS`. In zsh, through a pseudo-terminal during development (not in the test suite): names come with their emails.
+- The output is redacted like everything else.
 
 ### Doctor checks
 `cam doctor` (M5) prints one line per check, marked `ok`, `info`, `warn` or `fail`, with `hint:` lines indented below. Then comes a tally (`no problems found`, `1 warning`, `2 problems, 1 warning`). Any `fail` makes it exit 1, with the tally as the error; warnings alone exit 0. It never reads a token and never runs `claude`. In order:
@@ -221,7 +231,7 @@ With `CLAUDE_CODE_OAUTH_TOKEN` (through `cam exec`). `loggedIn` may only mean th
 3. `exec`: real-binary discovery, env injection, conflict warnings.
 4. Shim mode, `shim install`/`uninstall`.
 5. `whoami` and `doctor`. The identity check is deferred (see Open questions).
-6. Later: shell completions, README, release (cargo-dist / Homebrew tap, signed builds).
+6. Shell completions (done). Later: a release (cargo-dist / Homebrew tap, signed builds). Not planned yet.
 
 v2 ideas: a per-account `mode = "config-dir"` (for Remote Control and connectors), Linux/Windows stores, a prompt/status-line snippet that reads `CAM_ACTIVE_ACCOUNT`, and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
 
