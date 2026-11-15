@@ -5,6 +5,8 @@ Pick the Claude Code account per folder, the way `.nvmrc` picks a Node version.
 Put a `.claude-account` file in a folder. The nearest one up the tree decides which account `claude` starts with. Your settings, plugins, memory and history stay shared across accounts. Only the credential changes.
 
 > **Status: early.** cam stores tokens in the Keychain, works out which account applies where, starts `claude` with that account through `cam exec` or a `claude` shim, checks the setup with `whoami` and `doctor`, and has shell completions. There's no release yet: install from source. See the [roadmap](#roadmap).
+>
+> **Changing next:** each account will log in with Claude Code's own `/login` instead of a token, and token mode will go away. Each account will also start with its own setup, and share only the parts you pick: settings, instructions, extensions or history. See [DESIGN.md](DESIGN.md), milestones 7 and 8.
 
 ## Why
 
@@ -184,9 +186,12 @@ work
 - [x] 3. `exec`: find the real `claude`, inject the token, warn about conflicting variables
 - [x] 4. Shim mode: a `claude` → `cam` symlink on PATH, so plain `claude` picks the account
 - [x] 5. `whoami` and `doctor`: what applies here, stored tokens and their age, shim order, and anything that outranks the token
-- [ ] 6. Shell completions (done) and a release
+- [x] 6. Shell completions
+- [ ] 7. Native logins: each account is its own Claude Code config dir with its own `/login`. Token mode goes.
+- [ ] 8. Sharing: pick which parts of your setup each account shares, kept in sync with links
+- [ ] 9. A release
 
-Checking whose a token is, and that the server still accepts it, needs a source Claude Code doesn't offer in token mode. It's an open question in DESIGN.md.
+In token mode, cam can't check whose a token is: Claude Code doesn't report it. With milestone 7, `whoami` and `doctor` show who each account is logged in as, from Claude Code itself.
 
 ## Trade-offs of token mode
 
@@ -197,7 +202,7 @@ These come from Claude Code itself:
 - Claude Code can't see your plan in token mode. The startup header says "Claude API", and `/usage` shows a dollar estimate instead of your plan's limits. Usage still counts against your subscription. You can watch the plan meters move in Settings → Usage on claude.ai.
 - `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `apiKeyHelper` and cloud-provider variables outrank it.
 
-A per-account config-dir mode is planned for v2 to cover these.
+Milestone 7 replaces token mode with Claude Code's own login per account, which avoids all of these.
 
 ## Design
 
