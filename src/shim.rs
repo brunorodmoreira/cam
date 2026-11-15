@@ -1,9 +1,9 @@
-//! The `claude` → `cam` shim, busybox style. When cam runs under the name
-//! `claude`, it behaves exactly like `cam exec -- <args…>`.
+//! The `claude` → `cam` link (the shim), busybox style. When cam runs under
+//! the name `claude`, it behaves exactly like `cam exec -- <args…>`.
 //!
-//! `cam shim install` puts that symlink in a directory meant to come first on
-//! `PATH`. It only ever creates, replaces or removes a `claude` that is
-//! already a cam shim, so a mistaken `--dir` can't clobber the real `claude`.
+//! `cam init` keeps that link in `~/.local/share/cam/shims` and puts the dir
+//! first on `PATH`. It only ever creates or replaces a `claude` that is
+//! already a cam link, so it can't clobber a real `claude`.
 
 use std::env;
 use std::ffi::OsStr;
@@ -82,19 +82,6 @@ pub fn install(dir: &Path, target: &Path, own_exe: &Path) -> Result<Installed, E
     Ok(outcome)
 }
 
-/// Removes `<dir>/claude` if it is a cam shim, returning its path.
-pub fn uninstall(dir: &Path, own_exe: &Path) -> Result<PathBuf, Error> {
-    let path = dir.join(NAME);
-    match existing(&path, own_exe)? {
-        Existing::Missing => Err(Error::NoShim { path }),
-        Existing::Other => Err(Error::NotAShim { path }),
-        Existing::Shim { .. } => match fs::remove_file(&path) {
-            Ok(()) => Ok(path),
-            Err(source) => Err(Error::Write { path, source }),
-        },
-    }
-}
-
 enum Existing {
     Missing,
     /// A symlink to a cam binary: this one, or any file named `cam`, even one
@@ -129,7 +116,7 @@ fn existing(path: &Path, own_exe: &Path) -> Result<Existing, Error> {
     }
 }
 
-/// Whether `path` is a cam shim, by the rule `install` and `uninstall` use.
+/// Whether `path` is a cam shim, by the rule `install` uses.
 pub fn is_shim(path: &Path, own_exe: &Path) -> bool {
     matches!(existing(path, own_exe), Ok(Existing::Shim { .. }))
 }
@@ -156,124 +143,6 @@ pub fn first_on_path(path: Option<&OsStr>, own_exe: &Path) -> Reaches {
             Reaches::Shim(claude)
         }
         Some(claude) => Reaches::Other(claude),
-    }
-}
-
-/// Where the shim dir sits on `PATH`, relative to the other `claude`s.
-#[derive(Debug, PartialEq, Eq)]
-pub enum PathOrder {
-    /// Plain `claude` reaches the shim.
-    ShimFirst,
-    /// The shim dir isn't on `PATH`. `claude` is the first other `claude`,
-    /// if any.
-    Missing { claude: Option<PathBuf> },
-    /// The shim dir is on `PATH`, but `claude` comes first.
-    After { claude: PathBuf },
-}
-
-/// What a shell finds first when it runs `claude`: the shim dir, or another
-/// executable `claude` that isn't cam.
-pub fn path_order(path: Option<&OsStr>, shim_dir: &Path, own_exe: &Path) -> PathOrder {
-    let mut other = None;
-    for dir in env::split_paths(path.unwrap_or(OsStr::new(""))).filter(|dir| dir.is_absolute()) {
-        if same_file(&dir, shim_dir) {
-            return match other {
-                None => PathOrder::ShimFirst,
-                Some(claude) => PathOrder::After { claude },
-            };
-        }
-        let candidate = dir.join(NAME);
-        if other.is_none() && is_executable(&candidate) && !same_file(&candidate, own_exe) {
-            other = Some(candidate);
-        }
-    }
-    PathOrder::Missing { claude: other }
-}
-
-/// What to tell the user after installing, for their shell (`$SHELL`).
-pub fn advice(
-    order: &PathOrder,
-    shell: Option<&OsStr>,
-    dir: &Path,
-    home: Option<&Path>,
-) -> Vec<String> {
-    let shell = shell
-        .and_then(|shell| Path::new(shell).file_name())
-        .and_then(OsStr::to_str)
-        .unwrap_or("");
-    let (file, line) = startup_line(shell, &shell_path(dir, home));
-    let below = |claude: &Path| {
-        claude
-            .parent()
-            .map(|parent| format!(", below any line that adds {}", parent.display()))
-            .unwrap_or_default()
-    };
-    match order {
-        PathOrder::ShimFirst => vec![
-            "Plain `claude` now runs through cam: the shim dir comes first on PATH.".to_owned(),
-            "If this shell still runs the old `claude`, run `hash -r` or open a new terminal."
-                .to_owned(),
-        ],
-        PathOrder::Missing { claude } => vec![
-            format!(
-                "Next, put the shim dir first on PATH. Add this line to the end of {file}{}:",
-                claude.as_deref().map(below).unwrap_or_default()
-            ),
-            String::new(),
-            format!("    {line}"),
-            String::new(),
-            "Then open a new terminal. `cam which` shows the account `claude` will use.".to_owned(),
-        ],
-        PathOrder::After { claude } => vec![
-            format!(
-                "The shim dir is on PATH, but after {}, so plain `claude` still skips cam.",
-                claude.display()
-            ),
-            format!(
-                "In {file}, move the line that adds the shim dir{}, then open a new terminal:",
-                below(claude)
-            ),
-            String::new(),
-            format!("    {line}"),
-        ],
-    }
-}
-
-/// The startup file and the line that puts `dir` first on `PATH`.
-fn startup_line(shell: &str, dir: &str) -> (&'static str, String) {
-    match shell {
-        "fish" => (
-            "~/.config/fish/config.fish",
-            format!("set -gx PATH \"{dir}\" $PATH"),
-        ),
-        "zsh" => ("~/.zshrc", posix_line(dir)),
-        "bash" => ("~/.bashrc", posix_line(dir)),
-        _ => ("your shell's startup file", posix_line(dir)),
-    }
-}
-
-fn posix_line(dir: &str) -> String {
-    format!("export PATH=\"{dir}:$PATH\"")
-}
-
-/// `dir` for a double-quoted shell string: `$HOME/…` when under the home
-/// directory, so the line stays portable, with `"`, `\`, `$` and `` ` ``
-/// in the path escaped.
-fn shell_path(dir: &Path, home: Option<&Path>) -> String {
-    let escape = |text: &str| {
-        text.chars().fold(String::new(), |mut out, c| {
-            if matches!(c, '"' | '\\' | '$' | '`') {
-                out.push('\\');
-            }
-            out.push(c);
-            out
-        })
-    };
-    match home.and_then(|home| dir.strip_prefix(home).ok()) {
-        Some(rest) if !rest.as_os_str().is_empty() => {
-            format!("$HOME/{}", escape(&rest.to_string_lossy()))
-        }
-        _ => escape(&dir.to_string_lossy()),
     }
 }
 
@@ -376,69 +245,6 @@ mod tests {
     }
 
     #[test]
-    fn install_and_uninstall_leave_other_files_alone() {
-        let fx = Fixture::new();
-        let real = fx.tree.dir("versions").join("2.1.322");
-        write_exe(&real);
-        let bin = fx.tree.dir("bin");
-        symlink(&real, bin.join(NAME)).unwrap();
-        let plain = fx.tree.dir("plain");
-        write_exe(&plain.join(NAME));
-        for dir in [&bin, &plain] {
-            assert!(matches!(
-                install(dir, &fx.own_exe, &fx.own_exe),
-                Err(Error::ShimOccupied { .. })
-            ));
-            assert!(matches!(
-                uninstall(dir, &fx.own_exe),
-                Err(Error::NotAShim { .. })
-            ));
-        }
-        assert_eq!(fs::read_link(bin.join(NAME)).unwrap(), real);
-        assert!(plain.join(NAME).is_file());
-    }
-
-    #[test]
-    fn uninstall_removes_a_shim() {
-        let fx = Fixture::new();
-        install(&fx.shims(), &fx.own_exe, &fx.own_exe).unwrap();
-        assert_eq!(uninstall(&fx.shims(), &fx.own_exe).unwrap(), fx.link());
-        assert!(fs::symlink_metadata(fx.link()).is_err());
-        assert!(matches!(
-            uninstall(&fx.shims(), &fx.own_exe),
-            Err(Error::NoShim { .. })
-        ));
-    }
-
-    #[test]
-    fn path_order_cases() {
-        let fx = Fixture::new();
-        install(&fx.shims(), &fx.own_exe, &fx.own_exe).unwrap();
-        let local = fx.tree.dir("local/bin");
-        write_exe(&local.join(NAME));
-        let empty = fx.tree.dir("empty");
-        let order = |dirs: &[&Path]| {
-            let path = env::join_paths(dirs).unwrap();
-            path_order(Some(&path), &fx.shims(), &fx.own_exe)
-        };
-        let shims = fx.shims();
-        assert_eq!(order(&[&empty, &shims, &local]), PathOrder::ShimFirst);
-        assert_eq!(
-            order(&[&local, &shims]),
-            PathOrder::After {
-                claude: local.join(NAME)
-            }
-        );
-        assert_eq!(
-            order(&[&empty, &local]),
-            PathOrder::Missing {
-                claude: Some(local.join(NAME))
-            }
-        );
-        assert_eq!(order(&[&empty]), PathOrder::Missing { claude: None });
-    }
-
-    #[test]
     fn first_on_path_tells_a_shim_from_the_real_claude() {
         let fx = Fixture::new();
         install(&fx.shims(), &fx.own_exe, &fx.own_exe).unwrap();
@@ -474,92 +280,21 @@ mod tests {
     }
 
     #[test]
-    fn path_order_ignores_other_shims_to_this_cam() {
+    fn install_leaves_other_files_alone() {
         let fx = Fixture::new();
-        let elsewhere = fx.tree.dir("elsewhere");
-        symlink(&fx.own_exe, elsewhere.join(NAME)).unwrap();
-        fs::create_dir_all(fx.shims()).unwrap();
-        let path = env::join_paths([&elsewhere, &fx.shims()]).unwrap();
-        assert_eq!(
-            path_order(Some(&path), &fx.shims(), &fx.own_exe),
-            PathOrder::ShimFirst
-        );
-    }
-
-    #[test]
-    fn advice_for_each_shell() {
-        let home = Path::new("/home/me");
-        let dir = home.join(".local/share/cam/shims");
-        let missing = PathOrder::Missing {
-            claude: Some(home.join(".local/bin/claude")),
-        };
-        let zsh = advice(&missing, Some(OsStr::new("/bin/zsh")), &dir, Some(home));
-        assert_eq!(
-            zsh[0],
-            "Next, put the shim dir first on PATH. Add this line to the end of ~/.zshrc, below any line that adds /home/me/.local/bin:"
-        );
-        assert_eq!(
-            zsh[2],
-            "    export PATH=\"$HOME/.local/share/cam/shims:$PATH\""
-        );
-
-        let fish = advice(
-            &missing,
-            Some(OsStr::new("/opt/homebrew/bin/fish")),
-            &dir,
-            Some(home),
-        );
-        assert!(
-            fish[0].contains("~/.config/fish/config.fish"),
-            "{}",
-            fish[0]
-        );
-        assert_eq!(
-            fish[2],
-            "    set -gx PATH \"$HOME/.local/share/cam/shims\" $PATH"
-        );
-
-        let other = advice(&PathOrder::Missing { claude: None }, None, &dir, Some(home));
-        assert_eq!(
-            other[0],
-            "Next, put the shim dir first on PATH. Add this line to the end of your shell's startup file:"
-        );
-
-        let after = advice(
-            &PathOrder::After {
-                claude: home.join(".local/bin/claude"),
-            },
-            Some(OsStr::new("bash")),
-            &dir,
-            Some(home),
-        );
-        assert!(
-            after[0].contains("after /home/me/.local/bin/claude"),
-            "{}",
-            after[0]
-        );
-        assert!(after[1].starts_with("In ~/.bashrc"), "{}", after[1]);
-    }
-
-    #[test]
-    fn shell_path_uses_home_and_escapes() {
-        let home = Path::new("/home/me");
-        assert_eq!(
-            shell_path(Path::new("/home/me/shims"), Some(home)),
-            "$HOME/shims"
-        );
-        assert_eq!(
-            shell_path(Path::new("/opt/shims"), Some(home)),
-            "/opt/shims"
-        );
-        assert_eq!(
-            shell_path(Path::new("/opt/a \"b\" $c"), None),
-            "/opt/a \\\"b\\\" \\$c"
-        );
-        // A home of `/home/me` doesn't match `/home/meg`.
-        assert_eq!(
-            shell_path(Path::new("/home/meg/shims"), Some(home)),
-            "/home/meg/shims"
-        );
+        let real = fx.tree.dir("versions").join("2.1.322");
+        write_exe(&real);
+        let bin = fx.tree.dir("bin");
+        symlink(&real, bin.join(NAME)).unwrap();
+        let plain = fx.tree.dir("plain");
+        write_exe(&plain.join(NAME));
+        for dir in [&bin, &plain] {
+            assert!(matches!(
+                install(dir, &fx.own_exe, &fx.own_exe),
+                Err(Error::ShimOccupied { .. })
+            ));
+        }
+        assert_eq!(fs::read_link(bin.join(NAME)).unwrap(), real);
+        assert!(plain.join(NAME).is_file());
     }
 }

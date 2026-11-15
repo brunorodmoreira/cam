@@ -16,10 +16,11 @@ use crate::auth::{self, Expiry};
 use crate::config::Config;
 use crate::conflict;
 use crate::error::Error;
+use crate::init::{self, Shell};
 use crate::launch::{ENV_ACTIVE, ENV_CONFIG_DIR};
 use crate::resolve::Resolution;
 use crate::settings::{File, Inspection};
-use crate::shim::Reaches;
+use crate::shim::{self, Reaches};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -125,41 +126,50 @@ pub fn claude(found: Result<PathBuf, Error>) -> Check {
     }
 }
 
-/// What plain `claude` runs. `installed` is the default shim dir, if a shim
-/// is in it.
-pub fn shim(reaches: &Reaches, installed: Option<&Path>) -> Check {
-    const FIX: &str = "hint: run `cam shim install` to see the line to add or move";
-    const OPTIONS: &str = "hint: use `cam exec`, or run `cam shim install`";
+/// What plain `claude` runs, going by `PATH`. `installed` is the shim dir,
+/// if `cam init` has made the link in it. `shell` picks the setup line.
+pub fn path(reaches: &Reaches, installed: Option<&Path>, shell: Option<Shell>) -> Check {
+    let (file, line) = init::setup(shell);
+    let setup = format!("add `{line}` to the end of {file}, then open a new terminal");
     match (reaches, installed) {
         (Reaches::Shim(path), _) => Check::new(
             Status::Ok,
-            format!("shim: plain `claude` runs through cam ({})", path.display()),
+            format!("path: plain `claude` runs through cam ({})", path.display()),
         ),
         (Reaches::Other(claude), Some(dir)) => Check::new(
             Status::Warn,
             format!(
-                "shim: installed in {}, but plain `claude` runs {} first, without cam\n{FIX}",
-                dir.display(),
-                claude.display()
+                "path: plain `claude` runs {}, not cam\n\
+                 hint: {setup}; it must come after any line that adds {}. \
+                 If you'd rather not use cam for plain `claude`, delete {}",
+                claude.display(),
+                claude.parent().unwrap_or(claude).display(),
+                dir.join(shim::NAME).display()
             ),
         ),
         (Reaches::Nothing, Some(dir)) => Check::new(
             Status::Warn,
             format!(
-                "shim: installed in {}, but that dir isn't on PATH\n{FIX}",
-                dir.display()
+                "path: plain `claude` finds nothing on PATH\n\
+                 hint: {setup}. If you'd rather not use cam for plain `claude`, delete {}",
+                dir.join(shim::NAME).display()
             ),
         ),
         (Reaches::Other(claude), None) => Check::new(
             Status::Info,
             format!(
-                "shim: not installed, so plain `claude` ({}) skips cam\n{OPTIONS}",
+                "path: plain `claude` ({}) skips cam; `cam exec` uses the account\n\
+                 hint: to have plain `claude` pick the account, {setup}",
                 claude.display()
             ),
         ),
-        (Reaches::Nothing, None) => {
-            Check::new(Status::Info, format!("shim: not installed\n{OPTIONS}"))
-        }
+        (Reaches::Nothing, None) => Check::new(
+            Status::Info,
+            format!(
+                "path: plain `claude` finds nothing on PATH\n\
+                 hint: to have plain `claude` pick the account, {setup}"
+            ),
+        ),
     }
 }
 
@@ -297,20 +307,21 @@ pub fn account(name: &str, dir: &Path, dir_exists: bool, login: &Login, today: D
     }
 }
 
-/// Accounts (and `system`) logged in as the same email. `emails` holds
-/// (name, email) pairs.
-pub fn same_account(emails: &[(String, String)]) -> Vec<Check> {
-    let mut by_email: BTreeMap<String, Vec<&str>> = BTreeMap::new();
-    for (name, email) in emails {
-        by_email
-            .entry(email.to_lowercase())
+/// Accounts (and `system`) logged in as the same claude.ai account: the
+/// same email in the same org. `logins` holds (name, email, org). One
+/// email in two orgs is fine: a person can be in several.
+pub fn same_account(logins: &[(String, String, Option<String>)]) -> Vec<Check> {
+    let mut by_account: BTreeMap<(String, Option<&str>), Vec<&str>> = BTreeMap::new();
+    for (name, email, org) in logins {
+        by_account
+            .entry((email.to_lowercase(), org.as_deref()))
             .or_default()
             .push(name.as_str());
     }
-    by_email
+    by_account
         .into_iter()
         .filter(|(_, names)| names.len() > 1)
-        .map(|(email, names)| {
+        .map(|((email, _), names)| {
             let fix = names
                 .iter()
                 .find(|name| **name != SYSTEM)
@@ -325,7 +336,7 @@ pub fn same_account(emails: &[(String, String)]) -> Vec<Check> {
                 Status::Warn,
                 format!(
                     "same account: {} {verb} logged in as {email}\n\
-                     hint: sign the browser in to the right claude.ai account, then run `cam login {fix}`",
+                     hint: if {fix} should be another claude.ai account, switch accounts in the browser, then run `cam login {fix}`",
                     and_list(&names)
                 ),
             )
@@ -590,23 +601,46 @@ mod tests {
 
     #[test]
     fn same_account_checks() {
-        let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+        let logins = |list: &[(&str, &str, &str)]| -> Vec<(String, String, Option<String>)> {
             list.iter()
-                .map(|(name, email)| ((*name).to_owned(), (*email).to_owned()))
+                .map(|(name, email, org)| {
+                    (
+                        (*name).to_owned(),
+                        (*email).to_owned(),
+                        Some((*org).to_owned()),
+                    )
+                })
                 .collect()
         };
-        assert!(same_account(&pairs(&[("system", "a@x.org"), ("work", "b@y.com")])).is_empty());
-        let both = same_account(&pairs(&[("system", "a@x.org"), ("work", "A@x.org")]));
+        assert!(
+            same_account(&logins(&[
+                ("system", "a@x.org", "Me"),
+                ("work", "b@y.com", "Acme")
+            ]))
+            .is_empty()
+        );
+        // One person in two orgs.
+        assert!(
+            same_account(&logins(&[
+                ("system", "a@x.org", "Me"),
+                ("work", "a@x.org", "Acme")
+            ]))
+            .is_empty()
+        );
+        let both = same_account(&logins(&[
+            ("system", "a@x.org", "Me"),
+            ("work", "A@x.org", "Me"),
+        ]));
         assert_eq!(statuses(&both), [Status::Warn]);
         assert_eq!(
             both[0].message,
             "same account: system and work are both logged in as a@x.org\n\
-             hint: sign the browser in to the right claude.ai account, then run `cam login work`"
+             hint: if work should be another claude.ai account, switch accounts in the browser, then run `cam login work`"
         );
-        let three = same_account(&pairs(&[
-            ("system", "a@x.org"),
-            ("personal", "a@x.org"),
-            ("work", "a@x.org"),
+        let three = same_account(&logins(&[
+            ("system", "a@x.org", "Me"),
+            ("personal", "a@x.org", "Me"),
+            ("work", "a@x.org", "Me"),
         ]));
         assert!(
             three[0]
@@ -618,19 +652,27 @@ mod tests {
     }
 
     #[test]
-    fn shim_checks() {
+    fn path_checks() {
         let shim_path = PathBuf::from("/h/.local/share/cam/shims/claude");
         let real = PathBuf::from("/h/.local/bin/claude");
         let dir = Path::new("/h/.local/share/cam/shims");
-        let status = |reaches, installed| shim(&reaches, installed).status;
+        let zsh = Some(Shell::Zsh);
+        let status = |reaches, installed| path(&reaches, installed, zsh).status;
         assert_eq!(status(Reaches::Shim(shim_path), Some(dir)), Status::Ok);
         assert_eq!(
             status(Reaches::Other(real.clone()), Some(dir)),
             Status::Warn
         );
         assert_eq!(status(Reaches::Nothing, Some(dir)), Status::Warn);
-        assert_eq!(status(Reaches::Other(real), None), Status::Info);
+        assert_eq!(status(Reaches::Other(real.clone()), None), Status::Info);
         assert_eq!(status(Reaches::Nothing, None), Status::Info);
+        assert_eq!(
+            path(&Reaches::Other(real), Some(dir), zsh).message,
+            "path: plain `claude` runs /h/.local/bin/claude, not cam\n\
+             hint: add `eval \"$(cam init zsh)\"` to the end of ~/.zshrc, then open a new terminal; \
+             it must come after any line that adds /h/.local/bin. \
+             If you'd rather not use cam for plain `claude`, delete /h/.local/share/cam/shims/claude"
+        );
     }
 
     #[test]
@@ -643,6 +685,7 @@ mod tests {
         let err = here(Err(Error::UnknownAccount {
             name: "typo".to_owned(),
             origin: Origin::Env,
+            hint: "add it with `cam add typo`".to_owned(),
         }));
         assert_eq!(err.status, Status::Fail);
         assert!(err.message.contains("hint: add it with `cam add typo`"));

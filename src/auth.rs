@@ -147,24 +147,27 @@ pub fn login(mut command: Command, program: &Path) -> Result<ExitStatus, Error> 
     })
 }
 
-/// Runs `claude auth logout` (`command`). Its output is not shown.
+/// Runs `claude auth logout` (`command`). Its output is shown only when it
+/// fails: what it printed on stderr goes into the error, which is redacted
+/// like everything cam prints.
 pub fn logout(mut command: Command, program: &Path) -> Result<(), Error> {
     let output = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .output()
         .map_err(|source| Error::Exec {
             path: program.to_owned(),
             source,
         })?;
-    if output.success() {
-        Ok(())
-    } else {
-        Err(Error::Logout {
-            status: describe_exit(output),
-        })
+    if output.status.success() {
+        return Ok(());
     }
+    let printed = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(Error::Logout {
+        status: describe_exit(output.status),
+        output: (!printed.is_empty()).then_some(printed),
+    })
 }
 
 /// "exit status 1", or the signal that ended it.

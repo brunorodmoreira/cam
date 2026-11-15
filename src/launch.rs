@@ -19,9 +19,10 @@ pub const ENV_ACTIVE: &str = "CAM_ACTIVE_ACCOUNT";
 pub const ENV_DEPTH: &str = "CAM_SHIM_DEPTH";
 
 pub const ENV_OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+pub const ENV_API_KEY: &str = "ANTHROPIC_API_KEY";
 
 /// Credentials in the environment that Claude Code ranks above `/login`.
-pub const OUTRANKING: [&str; 3] = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", ENV_OAUTH_TOKEN];
+pub const OUTRANKING: [&str; 3] = ["ANTHROPIC_AUTH_TOKEN", ENV_API_KEY, ENV_OAUTH_TOKEN];
 
 /// The depth at which cam stops. Nested sessions raise the depth legitimately
 /// (claude's Bash tool running `claude`), so only a depth that no real

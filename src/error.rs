@@ -5,9 +5,9 @@
 //! through [`crate::redact`] first.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::account::NAME_RULE;
+use crate::account::{self, NAME_RULE};
 use crate::discover::ENV_CLAUDE_BIN;
 use crate::launch::ENV_DEPTH;
 use crate::resolve::Origin;
@@ -67,17 +67,31 @@ pub enum Error {
     )]
     EmptyMarker { path: PathBuf },
 
-    #[error("invalid account name \"{name}\" in {origin}: names must match {rule}", rule = NAME_RULE)]
+    #[error(
+        "invalid account name \"{name}\" in {origin}: names must match {rule}{}",
+        name_hint(.name),
+        rule = NAME_RULE
+    )]
     InvalidName { name: String, origin: Origin },
 
-    #[error("unknown account \"{name}\" (from {origin})\nhint: add it with `cam add {name}`")]
-    UnknownAccount { name: String, origin: Origin },
+    /// `hint` comes from [`unknown_hint`].
+    #[error("unknown account \"{name}\" (from {origin})\nhint: {hint}")]
+    UnknownAccount {
+        name: String,
+        origin: Origin,
+        hint: String,
+    },
 
-    #[error("invalid account name \"{name}\": names must match {rule}", rule = NAME_RULE)]
+    #[error(
+        "invalid account name \"{name}\": names must match {rule}{}",
+        name_hint(.name),
+        rule = NAME_RULE
+    )]
     InvalidNameArg { name: String },
 
-    #[error("unknown account \"{name}\"\nhint: add it with `cam add {name}`")]
-    UnknownAccountArg { name: String },
+    /// `hint` comes from [`unknown_hint`].
+    #[error("unknown account \"{name}\"\nhint: {hint}")]
+    UnknownAccountArg { name: String, hint: String },
 
     #[error("\"system\" is reserved: it's Claude Code's own setup, not an account")]
     ReservedName,
@@ -94,11 +108,24 @@ pub enum Error {
     )]
     NoAccountDir { name: String, dir: PathBuf },
 
-    #[error("nothing to remove: \"{name}\" has no config entry and no account dir")]
-    NothingToRemove { name: String },
+    #[error("nothing to remove: \"{name}\" has no config entry and no account dir\nhint: {hint}")]
+    NothingToRemove { name: String, hint: String },
 
-    #[error("the login didn't finish ({status})")]
-    LoginFailed { status: String },
+    #[error(
+        "not removing \"{name}\" without asking, and there's no terminal to ask on\nhint: pass --yes to remove it"
+    )]
+    Unconfirmed { name: String },
+
+    /// `retry` is the command that tries again.
+    #[error("the login didn't finish ({status})\nhint: run `{retry}` to try again")]
+    LoginFailed { status: String, retry: String },
+
+    #[error(
+        "Claude Code logged in with {method}, not a Claude subscription\n\
+         hint: log in with claude.ai (Pro, Max, Team or Enterprise). Claude Code keeps a Console \
+         login outside the account's dir, so cam can't keep one per account"
+    )]
+    NoSubscription { method: String },
 
     #[error("\"{name}\" isn't logged in\nhint: run `cam login {name}`")]
     NotLoggedIn { name: String },
@@ -106,8 +133,12 @@ pub enum Error {
     #[error("cannot read what `claude auth status` reports ({status})")]
     AuthStatus { status: String },
 
-    #[error("`claude auth logout` failed ({status})")]
-    Logout { status: String },
+    /// `output` is what `claude` printed, if anything.
+    #[error("`claude auth logout` failed ({status}){}", output.as_deref().map(|text| format!(": {text}")).unwrap_or_default())]
+    Logout {
+        status: String,
+        output: Option<String>,
+    },
 
     #[error(
         "cannot find the real `claude` on PATH\nhint: install Claude Code, or set {ENV_CLAUDE_BIN} to its full path"
@@ -135,16 +166,11 @@ pub enum Error {
     CurrentExe(#[source] io::Error),
 
     #[error(
-        "{} already exists and isn't a cam shim, so cam leaves it alone\nhint: remove it yourself, or pick another --dir",
+        "{} already exists and isn't cam's link, so cam leaves it alone\n\
+         hint: plain `claude` can't go through cam until you move it away",
         path.display()
     )]
     ShimOccupied { path: PathBuf },
-
-    #[error("{} isn't a cam shim, so cam leaves it alone", path.display())]
-    NotAShim { path: PathBuf },
-
-    #[error("no shim at {}", path.display())]
-    NoShim { path: PathBuf },
 
     #[error("cannot run {}", path.display())]
     Exec {
@@ -152,6 +178,57 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+}
+
+/// "\nhint: try `work`", for an invalid name that has a valid one close by.
+fn name_hint(name: &str) -> String {
+    account::suggest_name(name)
+        .map(|name| format!("\nhint: try `{name}`"))
+        .unwrap_or_default()
+}
+
+/// Where an unknown account name came from, for [`unknown_hint`].
+#[derive(Debug, Clone, Copy)]
+pub enum Named<'a> {
+    /// A marker in this dir.
+    Marker(&'a Path),
+    Env,
+    /// A command-line argument.
+    Arg,
+}
+
+/// The hint for an unknown account `name`, given the `known` ones:
+/// `system` for token mode's `none`, a close name for a typo, else `cam add`.
+pub fn unknown_hint<'a>(
+    name: &str,
+    known: impl IntoIterator<Item = &'a str>,
+    named: Named<'_>,
+) -> String {
+    let fix = |to: &str| match named {
+        Named::Marker(dir) => Some(format!(
+            "Fix it with `cam use {to} --dir {}`",
+            dir.display()
+        )),
+        Named::Env => Some(format!("Set CAM_ACCOUNT={to}")),
+        Named::Arg => None,
+    };
+    if name == "none" {
+        let fix = fix(account::SYSTEM)
+            .map(|fix| format!(". {fix}"))
+            .unwrap_or_default();
+        return format!(
+            "`none` was older cam's name for Claude Code's own setup, which is `system` now{fix}"
+        );
+    }
+    let add = format!("add \"{name}\" with `cam add {name}`");
+    match (account::closest(name, known), named) {
+        (Some(close), Named::Arg) => format!("did you mean `{close}`? Or {add}"),
+        (Some(close), _) => format!(
+            "did you mean `{close}`? {}, or {add}",
+            fix(close).unwrap_or_default()
+        ),
+        (None, _) => format!("add it with `cam add {name}`"),
+    }
 }
 
 impl Error {
@@ -164,5 +241,55 @@ impl Error {
             Self::Exec { .. } => 126,
             _ => 1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_hints() {
+        let known = ["work", "personal"];
+        let dir = Path::new("/home/me/Work");
+        assert_eq!(
+            unknown_hint("wrok", known, Named::Marker(dir)),
+            "did you mean `work`? Fix it with `cam use work --dir /home/me/Work`, or add \"wrok\" with `cam add wrok`"
+        );
+        assert_eq!(
+            unknown_hint("wrok", known, Named::Env),
+            "did you mean `work`? Set CAM_ACCOUNT=work, or add \"wrok\" with `cam add wrok`"
+        );
+        assert_eq!(
+            unknown_hint("wrok", known, Named::Arg),
+            "did you mean `work`? Or add \"wrok\" with `cam add wrok`"
+        );
+        assert_eq!(
+            unknown_hint("client", known, Named::Arg),
+            "add it with `cam add client`"
+        );
+        assert_eq!(
+            unknown_hint("none", ["nine"], Named::Marker(dir)),
+            "`none` was older cam's name for Claude Code's own setup, which is `system` now. Fix it with `cam use system --dir /home/me/Work`"
+        );
+        assert_eq!(
+            unknown_hint("none", known, Named::Arg),
+            "`none` was older cam's name for Claude Code's own setup, which is `system` now"
+        );
+    }
+
+    #[test]
+    fn invalid_names_get_a_suggestion() {
+        assert_eq!(
+            Error::InvalidNameArg {
+                name: "Work".into()
+            }
+            .to_string(),
+            "invalid account name \"Work\": names must match ^[a-z0-9][a-z0-9_-]*$\nhint: try `work`"
+        );
+        assert_eq!(
+            Error::InvalidNameArg { name: "--".into() }.to_string(),
+            "invalid account name \"--\": names must match ^[a-z0-9][a-z0-9_-]*$"
+        );
     }
 }

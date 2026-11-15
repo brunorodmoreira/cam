@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::account::Selection;
 use crate::config::Config;
-use crate::error::Error;
+use crate::error::{Error, Named, unknown_hint};
 use crate::marker;
 
 pub const ENV_ACCOUNT: &str = "CAM_ACCOUNT";
@@ -83,13 +83,21 @@ pub fn resolve(
     let Some(selection) = Selection::parse(&name) else {
         return Err(Error::InvalidName { name, origin });
     };
-    if let Selection::Account(name) = &selection
-        && !Config::load(config_path)?.has_account(name)
-    {
-        return Err(Error::UnknownAccount {
-            name: name.clone(),
-            origin,
-        });
+    if let Selection::Account(name) = &selection {
+        let config = Config::load(config_path)?;
+        if !config.has_account(name) {
+            let named = match &origin {
+                Origin::Marker(path) => Named::Marker(path.parent().unwrap_or(path)),
+                _ => Named::Env,
+            };
+            let known = config.accounts().keys().map(String::as_str);
+            let hint = unknown_hint(name, known, named);
+            return Err(Error::UnknownAccount {
+                name: name.clone(),
+                origin,
+                hint,
+            });
+        }
     }
     Ok(Resolution { selection, origin })
 }
@@ -206,7 +214,7 @@ mod tests {
         let err = resolve(None, &tree.dir("a/b"), &config).unwrap_err();
         assert!(matches!(
             &err,
-            Error::UnknownAccount { name, origin: Origin::Marker(path) } if name == "ghost" && *path == ghost
+            Error::UnknownAccount { name, origin: Origin::Marker(path), .. } if name == "ghost" && *path == ghost
         ));
         assert!(err.to_string().contains("cam add ghost"));
     }
@@ -347,7 +355,7 @@ mod tests {
         tree.marker("w", "work\n");
         assert!(matches!(
             resolve(Some("ghost"), &tree.dir("w"), &config),
-            Err(Error::UnknownAccount { name, origin: Origin::Env }) if name == "ghost"
+            Err(Error::UnknownAccount { name, origin: Origin::Env, .. }) if name == "ghost"
         ));
     }
 

@@ -5,7 +5,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, IsTerminal};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,17 +19,24 @@ use crate::conflict;
 use crate::date;
 use crate::discover::{self, ENV_CLAUDE_BIN, Search};
 use crate::doctor::{self, Login};
-use crate::error::Error;
+use crate::error::{Error, Named, unknown_hint};
+use crate::init::{self, Shell};
 use crate::launch::{self, ENV_ACTIVE, ENV_CONFIG_DIR, ENV_DEPTH, Target};
 use crate::marker::{self, FILE_NAME};
 use crate::redact::redact;
 use crate::resolve;
 use crate::settings;
-use crate::shim::{self, Installed};
+use crate::shim::{self, Reaches};
 
 /// Prints a line to stdout, redacted like everything else cam prints.
 fn say(line: impl Display) {
     println!("{}", redact(&line.to_string()));
+}
+
+/// Prints a line to stderr, redacted: for messages around an interactive
+/// step, which stdout would mix into the step's own output.
+fn tell(line: impl Display) {
+    eprintln!("{}", redact(&line.to_string()));
 }
 
 /// Prints a note to stderr, redacted.
@@ -90,21 +97,54 @@ fn login_status(program: &Path, target: Target<'_>, depth: u32) -> Result<auth::
     auth::status(command, program)
 }
 
-/// Runs Claude Code's login for `target`, then checks with Claude Code
-/// that it worked.
-fn log_in(program: &Path, target: Target<'_>, depth: u32) -> Result<auth::Status> {
-    let exit = auth::login(claude(program, &["auth", "login"], target, depth), program)?;
+/// Runs Claude Code's login for `target`, with `login_args` passed on
+/// (`--email`, `--sso`), then checks with Claude Code that it worked.
+/// `retry` is the command that tries again.
+fn log_in(
+    program: &Path,
+    target: Target<'_>,
+    depth: u32,
+    login_args: &[OsString],
+    retry: &str,
+) -> Result<auth::Status> {
+    let args: Vec<&OsStr> = [OsStr::new("auth"), OsStr::new("login")]
+        .into_iter()
+        .chain(login_args.iter().map(OsString::as_os_str))
+        .collect();
+    let exit = auth::login(claude(program, &args, target, depth), program)?;
     if !exit.success() {
         return Err(Error::LoginFailed {
             status: auth::describe_exit(exit),
+            retry: retry.to_owned(),
         }
         .into());
     }
     let status = login_status(program, target, depth)?;
+    if let Some(method) = status.other_method() {
+        return Err(Error::NoSubscription { method }.into());
+    }
     if !status.is_login() {
         bail!("Claude Code reports no login after `claude auth login`");
     }
     Ok(status)
+}
+
+/// Says, before the browser opens, which claude.ai account the login will
+/// use, and which emails `system` and the other accounts already use.
+fn before_login(name: &str, config: Option<&Config>, home: &Path) {
+    tell(format_args!(
+        "Logging {name} in with Claude Code. It uses the claude.ai account your browser is signed in to."
+    ));
+    let others: Vec<String> = config
+        .map(|config| recorded_emails(config, home))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(other, _)| other != name)
+        .map(|(other, email)| format!("{email} ({other})"))
+        .collect();
+    if !others.is_empty() {
+        tell(format_args!("Already in use: {}.", others.join(", ")));
+    }
 }
 
 /// The emails Claude Code last recorded for `system` and each account, as
@@ -120,36 +160,82 @@ fn recorded_emails(config: &Config, home: &Path) -> Vec<(String, String)> {
     system.into_iter().chain(accounts).collect()
 }
 
-/// Warns when `name` just logged in as an email another account (or
-/// `system`) already uses: the browser was probably signed in to the
-/// wrong claude.ai account.
-fn warn_same_account(name: &str, status: &auth::Status, config: &Config, home: &Path) {
+/// Warns when `name` just logged in as the account `system` or another
+/// account already uses: the browser was probably still signed in to it.
+/// The emails come from each `.claude.json`. On a match, Claude Code is
+/// asked about the other login too, since one email can belong to several
+/// orgs, and a different org is no mistake.
+fn warn_same_account(
+    name: &str,
+    status: &auth::Status,
+    config: &Config,
+    home: &Path,
+    program: &Path,
+    depth: u32,
+) {
     let Some(email) = &status.email else {
         return;
     };
     for (other, other_email) in recorded_emails(config, home) {
-        if other != name && other_email.eq_ignore_ascii_case(email) {
-            warn(format_args!(
-                "{name} is logged in as {email}, the same as {other}; the browser may have been signed in to the wrong claude.ai account\n\
-                 hint: sign it in to the right one, then run `cam login {name}`"
-            ));
+        if other == name || !other_email.eq_ignore_ascii_case(email) {
+            continue;
         }
+        let dir = account::dir(home, &other);
+        let target = match other.as_str() {
+            SYSTEM => Target::System,
+            _ => Target::Account {
+                name: &other,
+                dir: &dir,
+            },
+        };
+        if let Ok(other_status) = login_status(program, target, depth)
+            && other_status.is_login()
+            && other_status.org_name.is_some()
+            && other_status.org_name != status.org_name
+        {
+            continue;
+        }
+        let like = match other.as_str() {
+            SYSTEM => "your own login (system)".to_owned(),
+            _ => other.clone(),
+        };
+        warn(format_args!(
+            "{name} is logged in as {email}, the same account as {like}: the browser was probably still signed in to it\n\
+             hint: if {name} should be another claude.ai account, switch accounts in the browser, then run `cam login {name}`"
+        ));
     }
 }
 
-/// Warns about each variable set in this shell that outranks a login.
-fn warn_outranking(name: &str) {
+/// Whether `args` ask `claude` for print mode (`-p`), where Claude Code
+/// always uses `ANTHROPIC_API_KEY` without asking.
+fn print_mode(args: &[OsString]) -> bool {
+    args.iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "-p" || arg == "--print")
+}
+
+/// Tells about each variable set in this shell that outranks a login.
+/// Claude Code asks once whether to use `ANTHROPIC_API_KEY` in an
+/// interactive session, so that one is only a note there; with `-p` it's
+/// used without asking. The others are always used.
+fn warn_outranking(name: &str, print_mode: bool) {
     for var in launch::outranking(|key| env::var_os(key)) {
-        warn(format_args!(
-            "{var} is set and outranks the login of \"{name}\"; unset it to use that account"
-        ));
+        if var == launch::ENV_API_KEY && !print_mode {
+            note(format_args!(
+                "{var} is set; if you approve it when Claude Code asks, it's used instead of the login of \"{name}\" (\"Use custom API key\" in /config)"
+            ));
+        } else {
+            warn(format_args!(
+                "{var} is set and outranks the login of \"{name}\"; unset it to use that account"
+            ));
+        }
     }
 }
 
 /// `cam add`: creates the account dir, runs Claude Code's login in it, and
 /// records the account once Claude Code confirms the login. If anything
 /// fails, it logs out and deletes the dir, so a retry starts clean.
-pub fn add(name: &str, config_path: &Path) -> Result<()> {
+pub fn add(name: &str, login_args: &[OsString], config_path: &Path) -> Result<()> {
     let name = account_name(name)?;
     // A broken config fails here, before anything is created.
     let config = Config::load(config_path)?;
@@ -159,13 +245,16 @@ pub fn add(name: &str, config_path: &Path) -> Result<()> {
         return Err(Error::AccountExists { name, dir }.into());
     }
     let depth = depth()?;
-    let program = real_claude(&own_exe()?)?;
+    let own_exe = own_exe()?;
+    let program = real_claude(&own_exe)?;
     account::create_dir(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let target = Target::Account {
         name: &name,
         dir: &dir,
     };
-    let added = log_in(&program, target, depth).and_then(|status| {
+    before_login(&name, Some(&config), &home);
+    let retry = format!("cam add {name}");
+    let added = log_in(&program, target, depth, login_args, &retry).and_then(|status| {
         config::add_account(config_path, &name)?;
         Ok(status)
     });
@@ -175,8 +264,13 @@ pub fn add(name: &str, config_path: &Path) -> Result<()> {
                 "added {name}: logged in as {}",
                 status.identity()
             ));
-            warn_same_account(&name, &status, &config, &home);
-            warn_outranking(&name);
+            warn_same_account(&name, &status, &config, &home, &program, depth);
+            warn_outranking(&name, false);
+            let reaches = shim::first_on_path(env::var_os("PATH").as_deref(), &own_exe);
+            let shell = Shell::from_env(env::var_os("SHELL").as_deref());
+            for line in next_steps(&name, matches!(reaches, Reaches::Shim(_)), shell) {
+                say(line);
+            }
             Ok(())
         }
         Err(err) => {
@@ -189,18 +283,49 @@ pub fn add(name: &str, config_path: &Path) -> Result<()> {
     }
 }
 
+/// What to do after `cam add`: pin the account to a folder, send plain
+/// `claude` through cam unless it already goes (`reached`), and expect an
+/// empty setup.
+fn next_steps(name: &str, reached: bool, shell: Option<Shell>) -> Vec<String> {
+    let mut steps = vec![(
+        format!("cam use {name}"),
+        format!("use {name} in this folder and the ones below it (or pass --dir)"),
+    )];
+    if !reached {
+        let (file, line) = init::setup(shell);
+        steps.push((
+            line.to_owned(),
+            format!("at the end of {file}, so plain `claude` picks the account"),
+        ));
+    }
+    let width = steps
+        .iter()
+        .map(|(command, _)| command.len())
+        .max()
+        .unwrap_or(0);
+    let mut lines = vec![String::new(), "Next:".to_owned()];
+    lines.extend(
+        steps
+            .iter()
+            .map(|(command, what)| format!("  {command:<width$}  {what}")),
+    );
+    lines.push(String::new());
+    lines.push(format!(
+        "{name} starts with an empty Claude Code setup of its own: its first session shows the first-run screens, and your settings, CLAUDE.md, skills and MCP servers in ~/.claude aren't there."
+    ));
+    lines
+}
+
 /// `cam login`: runs Claude Code's login again for an account, by default
 /// the one that applies here. Deletes nothing if it fails.
-pub fn login(name: Option<&str>, config_path: &Path) -> Result<()> {
+pub fn login(name: Option<&str>, login_args: &[OsString], config_path: &Path) -> Result<()> {
     let selection = match name {
         Some(name) => {
             let selection = Selection::parse(name).ok_or_else(|| Error::InvalidNameArg {
                 name: name.to_owned(),
             })?;
-            if let Selection::Account(name) = &selection
-                && !Config::load(config_path)?.has_account(name)
-            {
-                return Err(Error::UnknownAccountArg { name: name.clone() }.into());
+            if let Selection::Account(name) = &selection {
+                known_account(name, &Config::load(config_path)?)?;
             }
             selection
         }
@@ -233,30 +358,62 @@ pub fn login(name: Option<&str>, config_path: &Path) -> Result<()> {
         (Selection::Account(name), Some(dir)) => Target::Account { name, dir },
         _ => Target::System,
     };
-    let status = log_in(&program, target, depth)?;
+    // The config only matters for naming the other accounts here.
+    let config = Config::load(config_path).ok();
+    before_login(&selection.to_string(), config.as_ref(), &home);
+    let retry = format!("cam login {selection}");
+    let status = log_in(&program, target, depth, login_args, &retry)?;
     say(format_args!(
         "{selection}: logged in as {}",
         status.identity()
     ));
-    // The config only matters for the same-account check here.
-    if let Ok(config) = Config::load(config_path) {
-        warn_same_account(&selection.to_string(), &status, &config, &home);
+    if let Some(config) = &config {
+        warn_same_account(
+            &selection.to_string(),
+            &status,
+            config,
+            &home,
+            &program,
+            depth,
+        );
     }
-    warn_outranking(&selection.to_string());
+    warn_outranking(&selection.to_string(), false);
     Ok(())
 }
 
-/// `cam remove`: logs the account out first, and stops if that fails, so
-/// its login is never orphaned. Then deletes its dir without following
-/// links, then its config entry.
-pub fn remove(name: &str, config_path: &Path) -> Result<()> {
+/// Fails unless `name` is configured, with a hint that names a close
+/// account if it's a typo.
+fn known_account(name: &str, config: &Config) -> Result<(), Error> {
+    if config.has_account(name) {
+        return Ok(());
+    }
+    let known = config.accounts().keys().map(String::as_str);
+    Err(Error::UnknownAccountArg {
+        name: name.to_owned(),
+        hint: unknown_hint(name, known, Named::Arg),
+    })
+}
+
+/// `cam remove`: asks first when there's an account dir to lose, unless
+/// `yes`. Then logs the account out, and stops if that fails, so its login
+/// is never orphaned. Then deletes its dir without following links, then
+/// its config entry.
+pub fn remove(name: &str, yes: bool, config_path: &Path) -> Result<()> {
     let name = account_name(name)?;
     // A broken config fails here, before anything is deleted.
-    let configured = Config::load(config_path)?.has_account(&name);
+    let config = Config::load(config_path)?;
+    let configured = config.has_account(&name);
     let dir = account::dir(&home()?, &name);
     let has_dir = account::exists(&dir);
     if !configured && !has_dir {
-        return Err(Error::NothingToRemove { name }.into());
+        let hint = match account::closest(&name, config.accounts().keys().map(String::as_str)) {
+            Some(close) => format!("did you mean `{close}`?"),
+            None => "`cam list` shows the accounts".to_owned(),
+        };
+        return Err(Error::NothingToRemove { name, hint }.into());
+    }
+    if has_dir && !yes {
+        confirm_remove(&name, &dir)?;
     }
     if has_dir {
         let logged_out = depth().map_err(anyhow::Error::from).and_then(|depth| {
@@ -290,6 +447,45 @@ pub fn remove(name: &str, config_path: &Path) -> Result<()> {
             "removed {name}: its config entry (it had no account dir)"
         )),
     }
+    let here = current_dir()
+        .ok()
+        .and_then(|cwd| marker::find(&cwd).ok().flatten());
+    match here {
+        Some((path, marked)) if marked == name => note(format_args!(
+            "{} names {name}, so `claude` stops with an error under it until you change it with `cam use`",
+            path.display()
+        )),
+        _ => note(format_args!(
+            "a .claude-account that names {name} now makes `claude` stop with an error; change it with `cam use`"
+        )),
+    }
+    Ok(())
+}
+
+/// Asks on the terminal before deleting an account dir. Without a
+/// terminal, fails: `--yes` is how a script says yes.
+fn confirm_remove(name: &str, dir: &Path) -> Result<()> {
+    let stdin = io::stdin();
+    if !(stdin.is_terminal() && io::stderr().is_terminal()) {
+        return Err(Error::Unconfirmed {
+            name: name.to_owned(),
+        }
+        .into());
+    }
+    tell(format_args!(
+        "This logs {name} out and deletes {}, with its transcripts, memory, settings and MCP servers.",
+        dir.display()
+    ));
+    eprint!("Remove {name}? [y/N] ");
+    let mut answer = String::new();
+    stdin
+        .lock()
+        .read_line(&mut answer)
+        .context("cannot read the answer")?;
+    ensure!(
+        matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        "nothing was removed"
+    );
     Ok(())
 }
 
@@ -448,9 +644,10 @@ pub fn doctor(config_path: &Path) -> Result<()> {
     let installed = shim_dir
         .as_deref()
         .filter(|dir| shim::is_shim(&dir.join(shim::NAME), &own_exe));
-    checks.push(doctor::shim(
+    checks.push(doctor::path(
         &shim::first_on_path(path.as_deref(), &own_exe),
         installed,
+        Shell::from_env(env::var_os("SHELL").as_deref()),
     ));
 
     let exists = config_path.try_exists().unwrap_or(true);
@@ -470,7 +667,7 @@ pub fn doctor(config_path: &Path) -> Result<()> {
             && status.is_login()
             && let Some(email) = &status.email
         {
-            emails.push((name.to_owned(), email.clone()));
+            emails.push((name.to_owned(), email.clone(), status.org_name.clone()));
         }
     };
     let system = ask(Target::System);
@@ -551,7 +748,7 @@ pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
                 }
                 .into());
             }
-            warn_outranking(name);
+            warn_outranking(name, print_mode(args));
             Target::Account { name, dir: &dir }
         }
     };
@@ -585,84 +782,63 @@ fn own_exe() -> Result<PathBuf, Error> {
     }
 }
 
-/// `--dir`, made absolute, or the default shim dir.
-fn shim_dir(dir: Option<&Path>) -> Result<PathBuf> {
-    match dir {
-        Some(dir) => {
-            std::path::absolute(dir).with_context(|| format!("cannot open {}", dir.display()))
-        }
-        None => shim::default_dir(dirs::home_dir())
-            .ok_or_else(|| anyhow!("cannot find the home directory; pass --dir")),
-    }
-}
-
-/// `cam shim install`: creates or updates the shim, then says what, if
-/// anything, is left to do on PATH. Never edits shell startup files.
-pub fn shim_install(dir: Option<&Path>) -> Result<()> {
-    let dir = shim_dir(dir)?;
-    let own_exe = own_exe()?;
+/// `cam init`: keeps the `claude` → `cam` link in the shim dir, then
+/// prints the code that puts that dir first on `PATH` and loads
+/// `completions`. It runs at every shell start, so a problem is a warning
+/// on stderr, and the rest of the code still loads.
+pub fn init(shell: Shell, completions: &str) -> Result<()> {
+    let warn = |message: &dyn Display| {
+        eprintln!("cam: warning: {}", redact(&message.to_string()));
+    };
     let path = env::var_os("PATH");
-    let target = shim::target(&own_exe, path.as_deref());
-    let link = dir.join(shim::NAME);
-    let (link_shown, target_shown) = (link.display(), target.display());
-    match shim::install(&dir, &target, &own_exe)? {
-        Installed::Created => say(format_args!("installed {link_shown} -> {target_shown}")),
-        Installed::Replaced { previous } => say(format_args!(
-            "replaced {link_shown} -> {target_shown} (it pointed at {})",
-            previous.display()
-        )),
-        Installed::Unchanged => {
-            say(format_args!(
-                "already installed: {link_shown} -> {target_shown}"
-            ));
+    let mut code = String::new();
+    match (shim::default_dir(dirs::home_dir()), own_exe()) {
+        (None, _) => warn(&"cannot find the home directory, so plain `claude` skips cam; set HOME"),
+        (_, Err(err)) => warn(&err),
+        (Some(dir), Ok(own_exe)) => {
+            let target = shim::target(&own_exe, path.as_deref());
+            match (shim::install(&dir, &target, &own_exe), dir.to_str()) {
+                (Ok(_), Some(dir)) => code.push_str(&init::path_code(shell, dir, path.as_deref())),
+                (Ok(_), None) => warn(&format_args!(
+                    "{} isn't valid UTF-8, so cam can't put it on PATH",
+                    dir.display()
+                )),
+                (Err(err), _) => warn(&err),
+            }
         }
     }
-    let order = shim::path_order(path.as_deref(), &dir, &own_exe);
-    let home = dirs::home_dir();
-    say("");
-    for line in shim::advice(
-        &order,
-        env::var_os("SHELL").as_deref(),
-        &dir,
-        home.as_deref(),
-    ) {
-        say(line);
-    }
-    if let Err(Error::ClaudeNotFound) = real_claude(&own_exe) {
-        note("no real `claude` found on PATH yet; install Claude Code, or set CAM_CLAUDE_BIN");
-    }
+    code.push_str(&init::completions_code(shell, completions));
+    print!("{}", redact(&code));
     Ok(())
 }
 
-/// `cam shim uninstall`: removes the shim, if it is one.
-pub fn shim_uninstall(dir: Option<&Path>) -> Result<()> {
-    let dir = shim_dir(dir)?;
-    let removed = shim::uninstall(&dir, &own_exe()?)?;
-    say(format_args!("removed {}", removed.display()));
-    let on_path = env::var_os("PATH")
-        .is_some_and(|path| env::split_paths(&path).any(|entry| discover::same_file(&entry, &dir)));
-    if on_path {
-        note(format_args!(
-            "{} is still on PATH; you can remove that line from your shell's startup file",
-            dir.display()
-        ));
-    }
-    Ok(())
-}
-
+/// `cam use`: writes the marker, and says what it replaced.
 pub fn use_account(name: &str, dir: Option<&Path>, config_path: &Path) -> Result<()> {
     let selection = Selection::parse(name).ok_or_else(|| Error::InvalidNameArg {
         name: name.to_owned(),
     })?;
-    if let Selection::Account(name) = &selection
-        && !Config::load(config_path)?.has_account(name)
-    {
-        return Err(Error::UnknownAccountArg { name: name.clone() }.into());
+    if let Selection::Account(name) = &selection {
+        known_account(name, &Config::load(config_path)?)?;
     }
     let dir = target_dir(dir)?;
+    // An unreadable marker is just replaced.
+    let previous = marker::read(&dir.join(FILE_NAME)).ok().flatten();
     let path = marker::write(&dir, &selection)
         .with_context(|| format!("cannot write {}", dir.join(FILE_NAME).display()))?;
-    say(format_args!("wrote {} ({selection})", path.display()));
+    let shown = path.display();
+    match previous {
+        Some(previous) if previous != selection.to_string() => {
+            say(format_args!("wrote {shown} ({selection}, was {previous})"));
+        }
+        Some(_) => say(format_args!("wrote {shown} ({selection}, as before)")),
+        None => say(format_args!("wrote {shown} ({selection})")),
+    }
+    if dir.ancestors().any(|dir| dir.join(".git").exists()) {
+        note(format_args!(
+            "{} is in a git repository; to keep {FILE_NAME} out of commits, list it in your global gitignore (~/.config/git/ignore by default)",
+            dir.display()
+        ));
+    }
     Ok(())
 }
 
@@ -694,16 +870,26 @@ fn current_dir() -> Result<PathBuf> {
     env::current_dir().context("cannot read the current directory")
 }
 
-/// `dir`, or the current directory, made absolute. Must be an existing directory.
+/// `dir`, or the current directory, made absolute. Must be an existing
+/// directory. A leading `~` is the home directory, since a shell leaves it
+/// alone in `--dir=~/Work`.
 fn target_dir(dir: Option<&Path>) -> Result<PathBuf> {
     let dir = match dir {
-        Some(dir) => dir.to_owned(),
+        Some(dir) => expand_home(dir, dirs::home_dir().as_deref()),
         None => current_dir()?,
     };
     let canonical =
         fs::canonicalize(&dir).with_context(|| format!("cannot open {}", dir.display()))?;
     ensure!(canonical.is_dir(), "{} is not a directory", dir.display());
     Ok(canonical)
+}
+
+/// `path` with a leading `~` or `~/` replaced by `home`.
+fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
+    match (path.strip_prefix("~"), home) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path.to_owned(),
+    }
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ mod date;
 mod discover;
 mod doctor;
 mod error;
+mod init;
 mod launch;
 mod marker;
 mod redact;
@@ -33,8 +34,23 @@ use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use crate::error::Error;
 use crate::redact::redact;
 
+const GETTING_STARTED: &str = "\
+Getting started:
+  cam add work                log a new account in, with Claude Code's own login
+  cam use work --dir ~/Work   use it in ~/Work and every folder below
+  eval \"$(cam init zsh)\"      at the end of ~/.zshrc, so plain `claude` picks the account
+
+Where no .claude-account applies, `claude` runs as it always has: that's
+`system`, Claude Code's own setup and login.";
+
 #[derive(Parser)]
-#[command(name = "cam", version, about, arg_required_else_help = true)]
+#[command(
+    name = "cam",
+    version,
+    about,
+    arg_required_else_help = true,
+    after_help = GETTING_STARTED
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -46,10 +62,16 @@ enum Command {
     ///
     /// The account gets its own Claude Code config dir, under
     /// ~/.local/share/cam/accounts. cam runs `claude auth login` in it, so
-    /// you pick the account in the browser, as with `/login`.
+    /// you pick the account in the browser, as with `/login`. The account
+    /// starts with an empty setup: none of your settings, CLAUDE.md, skills
+    /// or MCP servers.
     Add {
-        /// Account name, matching ^[a-z0-9][a-z0-9_-]*$.
+        /// Account name: lowercase letters, digits, `-` and `_`, like `work`.
         name: String,
+        /// After `--`, arguments for `claude auth login`: `--email <address>`
+        /// fills in the email, `--sso` forces single sign-on.
+        #[arg(last = true, value_name = "LOGIN_ARGS")]
+        login_args: Vec<OsString>,
     },
     /// Log an account in again with Claude Code's own login.
     ///
@@ -58,25 +80,37 @@ enum Command {
     Login {
         /// The account, or `system`. Defaults to the one that applies here.
         name: Option<String>,
+        /// After `--`, arguments for `claude auth login`, as for `add`.
+        #[arg(last = true, value_name = "LOGIN_ARGS")]
+        login_args: Vec<OsString>,
     },
-    /// Log an account out, then delete its dir and config entry.
+    /// Log an account out and delete it, with its transcripts and memory.
+    ///
+    /// Asks first, unless --yes. Afterwards, a .claude-account that names
+    /// the account makes `claude` stop with an error until you change it.
     Remove {
         /// The account to remove.
         name: String,
+        /// Don't ask. Needed when there's no terminal to ask on.
+        #[arg(short, long)]
+        yes: bool,
     },
     /// List `system` and the accounts, with the email each is logged in as.
     List,
-    /// Pin an account to a folder by writing .claude-account.
+    /// Use an account in a folder and every folder below it.
+    ///
+    /// Writes .claude-account in the folder, replacing one that's there.
+    /// The nearest one up the tree decides which account `claude` uses.
     Use {
-        /// A configured account, or `system` for Claude Code's own setup from this folder down.
+        /// An account, or `system` for Claude Code's own setup.
         name: String,
-        /// Write the marker in DIR instead of the current directory.
+        /// The folder, instead of the current one.
         #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
         dir: Option<PathBuf>,
     },
     /// Remove the .claude-account marker from a folder.
     Unuse {
-        /// Remove the marker in DIR instead of the current directory.
+        /// The folder, instead of the current one.
         #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
         dir: Option<PathBuf>,
     },
@@ -94,8 +128,8 @@ enum Command {
     /// Run the real `claude` with the account that applies here.
     ///
     /// Arguments after `exec` go to claude unchanged. Put them after `--` when
-    /// one could be read as cam's own, e.g. `cam exec -- --help`. The shim
-    /// (`cam shim install`) does this for plain `claude`.
+    /// one could be read as cam's own, e.g. `cam exec -- --help`. With
+    /// `cam init` in your shell's startup file, plain `claude` does this.
     Exec {
         /// Arguments for claude.
         #[arg(
@@ -105,13 +139,31 @@ enum Command {
         )]
         args: Vec<OsString>,
     },
-    /// Manage the shim that sends plain `claude` through cam.
-    #[command(subcommand)]
-    Shim(ShimCommand),
+    /// Print the shell code that makes plain `claude` pick the account.
+    ///
+    /// Add one line to the end of your shell's startup file, after any line
+    /// that puts Claude Code's own dir (~/.local/bin) on PATH:
+    ///
+    ///   zsh, in ~/.zshrc:                     eval "$(cam init zsh)"
+    ///   bash, in ~/.bashrc:                   eval "$(cam init bash)"
+    ///   fish, in ~/.config/fish/config.fish:  cam init fish | source
+    ///
+    /// It keeps a `claude` link to cam in ~/.local/share/cam/shims, puts
+    /// that dir first on PATH, and loads completions with your account
+    /// names. To stop, delete the line.
+    #[command(
+        verbatim_doc_comment,
+        about = "Print the shell code that makes plain `claude` pick the account"
+    )]
+    Init {
+        /// The shell to write the code for.
+        shell: init::Shell,
+    },
     /// Print a shell completion script.
     ///
-    /// Account names are filled in when the script is generated, so load it
-    /// from your shell's startup file instead of saving it to a file:
+    /// `cam init` loads it already. On its own, load it from your shell's
+    /// startup file rather than saving it, since account names are filled
+    /// in when it's generated:
     ///
     ///   zsh, in ~/.zshrc (after compinit):   eval "$(cam completions zsh)"
     ///   bash, in ~/.bashrc:                  eval "$(cam completions bash)"
@@ -120,25 +172,6 @@ enum Command {
     Completions {
         /// The shell to write the script for.
         shell: clap_complete::Shell,
-    },
-}
-
-#[derive(Subcommand)]
-enum ShimCommand {
-    /// Create a `claude` -> `cam` symlink, and say how to put it first on PATH.
-    ///
-    /// Never edits shell startup files, and never replaces a `claude` that
-    /// isn't a cam shim.
-    Install {
-        /// Put the shim in DIR instead of ~/.local/share/cam/shims.
-        #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
-        dir: Option<PathBuf>,
-    },
-    /// Remove the shim. Leaves anything that isn't a cam shim alone.
-    Uninstall {
-        /// Remove the shim from DIR instead of ~/.local/share/cam/shims.
-        #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
-        dir: Option<PathBuf>,
     },
 }
 
@@ -151,11 +184,10 @@ pub fn run() -> ExitCode {
         .is_some_and(|argv0| shim::invoked_as_shim(&argv0))
     {
         let args: Vec<OsString> = args.collect();
-        return report(
-            config_path()
-                .map_err(Into::into)
-                .and_then(|config| match commands::exec(&args, &config)? {}),
-        );
+        let result = config_path()
+            .map_err(Into::into)
+            .and_then(|config| match commands::exec(&args, &config)? {});
+        return report(result.map_err(escape_hint));
     }
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -180,15 +212,46 @@ fn report(result: anyhow::Result<()>) -> ExitCode {
     }
 }
 
+/// For plain `claude`: when cam fails over the account, adds how to run
+/// Claude Code without one.
+fn escape_hint(err: anyhow::Error) -> anyhow::Error {
+    let about_the_account = matches!(
+        err.downcast_ref::<Error>(),
+        Some(
+            Error::EnvNotUnicode
+                | Error::Read { .. }
+                | Error::NotUtf8 { .. }
+                | Error::ParseConfig { .. }
+                | Error::ConfigShape { .. }
+                | Error::TokenModeConfig { .. }
+                | Error::InvalidConfigAccount { .. }
+                | Error::EmptyMarker { .. }
+                | Error::InvalidName { .. }
+                | Error::UnknownAccount { .. }
+                | Error::NoAccountDir { .. }
+        )
+    );
+    let already = env::var(resolve::ENV_ACCOUNT).is_ok_and(|value| value.trim() == account::SYSTEM);
+    if about_the_account && !already {
+        anyhow::anyhow!(
+            "{err:#}\nhint: `CAM_ACCOUNT=system claude` runs Claude Code with its own setup, without cam"
+        )
+    } else {
+        err
+    }
+}
+
 fn config_path() -> Result<PathBuf, Error> {
     config::path(env::var_os(config::ENV_CONFIG), dirs::home_dir())
 }
 
 fn dispatch(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Add { name } => commands::add(&name, &config_path()?),
-        Command::Login { name } => commands::login(name.as_deref(), &config_path()?),
-        Command::Remove { name } => commands::remove(&name, &config_path()?),
+        Command::Add { name, login_args } => commands::add(&name, &login_args, &config_path()?),
+        Command::Login { name, login_args } => {
+            commands::login(name.as_deref(), &login_args, &config_path()?)
+        }
+        Command::Remove { name, yes } => commands::remove(&name, yes, &config_path()?),
         Command::List => commands::list(&config_path()?),
         Command::Use { name, dir } => commands::use_account(&name, dir.as_deref(), &config_path()?),
         Command::Unuse { dir } => commands::unuse(dir.as_deref()),
@@ -196,8 +259,12 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::Whoami => commands::whoami(&config_path()?),
         Command::Doctor => commands::doctor(&config_path()?),
         Command::Exec { args } => match commands::exec(&args, &config_path()?)? {},
-        Command::Shim(ShimCommand::Install { dir }) => commands::shim_install(dir.as_deref()),
-        Command::Shim(ShimCommand::Uninstall { dir }) => commands::shim_uninstall(dir.as_deref()),
+        Command::Init { shell } => {
+            let config = config_path().ok();
+            let script =
+                completions::script(shell.completions(), Cli::command(), config.as_deref());
+            commands::init(shell, &script)
+        }
         Command::Completions { shell } => {
             let config = config_path().ok();
             print!(

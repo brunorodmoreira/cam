@@ -142,6 +142,9 @@ fn fake_login(json: &Path, email: &str) {
 
 const CAM: &str = env!("CARGO_BIN_EXE_cam");
 
+/// What `add work` and `login work` say before the browser opens.
+const LOGGING_WORK: &str = "Logging work in with Claude Code. It uses the claude.ai account your browser is signed in to.\n";
+
 /// A stand-in for `claude`. `auth login`, `auth status` and `auth logout`
 /// act on a fake login in `$CLAUDE_CONFIG_DIR`, or in `$HOME` for Claude
 /// Code's own setup, and log the call to `$FAKE_LOG`. Anything else prints
@@ -151,6 +154,9 @@ const CAM: &str = env!("CARGO_BIN_EXE_cam");
 /// - `FAKE_LOGIN=fail` makes the login fail; `nothing` makes it succeed
 ///   without logging in.
 /// - `FAKE_EMAIL` is the email a login gets (default: `<account>@example.com`).
+/// - `FAKE_ORG` is the org a login gets (default: `Acme`).
+/// - `auth login --console` makes a Console login, which `auth status`
+///   reports as an API key, not a claude.ai login.
 /// - `FAKE_EXPIRES` is the `loginExpiresAt` that `auth status` reports.
 /// - `FAKE_LOGOUT=fail` makes the logout fail.
 /// - With `ANTHROPIC_API_KEY` set, `auth status` reports the key instead.
@@ -169,9 +175,17 @@ case "$1 $2" in
         fail) echo 'Login cancelled.' >&2; exit 1 ;;
         nothing) exit 0 ;;
     esac
+    for arg in "$@"; do
+        if [ "$arg" = --console ]; then
+            : > "$json.console"
+            echo 'Login successful.'
+            exit 0
+        fi
+    done
     email="${FAKE_EMAIL:-${CAM_ACTIVE_ACCOUNT:-system}@example.com}"
     printf '{"oauthAccount": {"emailAddress": "%s"}}\n' "$email" > "$json"
     printf '%s\n' "$email" > "$json.email"
+    printf '%s\n' "${FAKE_ORG:-Acme}" > "$json.org"
     echo 'Login successful.'
     exit 0 ;;
 'auth status')
@@ -179,10 +193,16 @@ case "$1 $2" in
         echo '{"loggedIn": true, "authMethod": "api_key", "apiKeySource": "ANTHROPIC_API_KEY"}'
         exit 0
     fi
+    if [ -e "$json.console" ]; then
+        echo '{"loggedIn": true, "authMethod": "api_key", "apiKeySource": "/login managed key"}'
+        exit 0
+    fi
     if [ -s "$json.email" ]; then
         read -r email < "$json.email"
-        printf '{"loggedIn": true, "authMethod": "claude.ai", "email": "%s", "orgName": "Acme", "subscriptionType": "team", "loginExpiresAt": "%s"}\n' \
-            "$email" "${FAKE_EXPIRES:-2099-01-01T00:00:00.000Z}"
+        org=Acme
+        if [ -s "$json.org" ]; then read -r org < "$json.org"; fi
+        printf '{"loggedIn": true, "authMethod": "claude.ai", "email": "%s", "orgName": "%s", "subscriptionType": "team", "loginExpiresAt": "%s"}\n' \
+            "$email" "$org" "${FAKE_EXPIRES:-2099-01-01T00:00:00.000Z}"
         exit 0
     fi
     echo '{"loggedIn": false, "authMethod": "none", "loginExpiresAt": null}'
@@ -286,12 +306,34 @@ fn which_reports_system_marker() {
 #[test]
 fn which_treats_an_old_none_marker_as_an_unknown_account() {
     let sb = Sandbox::new();
-    sb.marker("oss", "none\n");
+    let marker = sb.marker("oss", "none\n");
     sb.cam(&sb.dir("oss"))
         .arg("which")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unknown account \"none\""));
+        .stderr(format!(
+            "cam: unknown account \"none\" (from {})\n\
+             hint: `none` was older cam's name for Claude Code's own setup, which is `system` now. \
+             Fix it with `cam use system --dir {}`\n",
+            marker.display(),
+            sb.dir("oss").display()
+        ));
+}
+
+#[test]
+fn which_suggests_a_close_account_name() {
+    let sb = Sandbox::new();
+    let marker = sb.marker("a", "wrok\n");
+    sb.cam(&sb.dir("a/b"))
+        .arg("which")
+        .assert()
+        .code(1)
+        .stderr(format!(
+            "cam: unknown account \"wrok\" (from {})\n\
+             hint: did you mean `work`? Fix it with `cam use work --dir {}`, or add \"wrok\" with `cam add wrok`\n",
+            marker.display(),
+            sb.dir("a").display()
+        ));
 }
 
 #[test]
@@ -371,7 +413,7 @@ fn which_invalid_marker_name_fails() {
         .failure()
         .code(1)
         .stderr(format!(
-            "cam: invalid account name \"Work\" in {}: names must match ^[a-z0-9][a-z0-9_-]*$\n",
+            "cam: invalid account name \"Work\" in {}: names must match ^[a-z0-9][a-z0-9_-]*$\nhint: try `work`\n",
             marker.display()
         ));
 }
@@ -504,8 +546,61 @@ fn use_replaces_existing_marker() {
     sb.cam(&sb.dir("a"))
         .args(["use", "work"])
         .assert()
-        .success();
+        .success()
+        .stdout(format!("wrote {} (work, was personal)\n", marker.display()));
     assert_eq!(read(&marker), "work\n");
+    sb.cam(&sb.dir("a"))
+        .args(["use", "work"])
+        .assert()
+        .success()
+        .stdout(format!("wrote {} (work, as before)\n", marker.display()));
+}
+
+#[test]
+fn use_expands_a_tilde_in_dir() {
+    let sb = Sandbox::new();
+    let work = sb.dir("home/Work");
+    sb.cam(&sb.root)
+        .args(["use", "work", "--dir=~/Work"])
+        .assert()
+        .success()
+        .stdout(format!(
+            "wrote {} (work)\n",
+            work.join(".claude-account").display()
+        ));
+    sb.cam(&sb.root)
+        .args(["unuse", "--dir=~/Work"])
+        .assert()
+        .success();
+    assert!(!work.join(".claude-account").exists());
+}
+
+#[test]
+fn use_notes_a_git_repository() {
+    let sb = Sandbox::new();
+    sb.dir("repo/.git");
+    let sub = sb.dir("repo/sub");
+    sb.cam(&sub)
+        .args(["use", "work"])
+        .assert()
+        .success()
+        .stderr(format!(
+            "note: {} is in a git repository; to keep .claude-account out of commits, \
+             list it in your global gitignore (~/.config/git/ignore by default)\n",
+            sub.display()
+        ));
+}
+
+#[test]
+fn use_suggests_a_close_account_name() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .args(["use", "persona"])
+        .assert()
+        .code(1)
+        .stderr(
+            "cam: unknown account \"persona\"\nhint: did you mean `personal`? Or add \"persona\" with `cam add persona`\n",
+        );
 }
 
 #[test]
@@ -658,7 +753,10 @@ fn no_arguments_prints_help() {
     sb.cam(&sb.root)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Usage: cam"));
+        .stderr(predicate::str::contains("Usage: cam"))
+        .stderr(predicate::str::contains(
+            "Getting started:\n  cam add work ",
+        ));
 }
 
 #[test]
@@ -680,10 +778,21 @@ fn add_logs_in_and_records_the_account() {
     sb.fake_claude("bin");
     sb.cam(&sb.root)
         .args(["add", "work"])
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success()
-        .stdout("Login successful.\nadded work: logged in as work@example.com (Acme, team)\n")
-        .stderr("");
+        .stdout(
+            "Login successful.\n\
+             added work: logged in as work@example.com (Acme, team)\n\
+             \n\
+             Next:\n  \
+               cam use work            use work in this folder and the ones below it (or pass --dir)\n  \
+               eval \"$(cam init zsh)\"  at the end of ~/.zshrc, so plain `claude` picks the account\n\
+             \n\
+             work starts with an empty Claude Code setup of its own: its first session shows the first-run screens, \
+             and your settings, CLAUDE.md, skills and MCP servers in ~/.claude aren't there.\n",
+        )
+        .stderr(LOGGING_WORK);
     assert_eq!(read(&sb.config), "[accounts.work]\n");
     let dir = sb.account_dir("work");
     let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
@@ -695,6 +804,60 @@ fn add_logs_in_and_records_the_account() {
             dir = dir.display()
         )
     );
+}
+
+#[test]
+fn add_skips_the_init_step_once_plain_claude_reaches_cam() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.cam(&sb.root).args(["init", "zsh"]).assert().success();
+    let out = stdout_of(
+        &sb.cam(&sb.root)
+            .args(["add", "work"])
+            .env("PATH", sb.path(&[&sb.shims(), &sb.bin()]))
+            .assert()
+            .success(),
+    );
+    assert!(
+        out.contains("  cam use work  use work in this folder"),
+        "{out}"
+    );
+    assert!(!out.contains("cam init"), "{out}");
+}
+
+#[test]
+fn add_passes_login_arguments_to_claude() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["add", "work", "--", "--email", "you@company.com", "--sso"])
+        .assert()
+        .success();
+    assert!(
+        sb.log().starts_with(&format!(
+            "auth login --email you@company.com --sso ({})\n",
+            sb.account_dir("work").display()
+        )),
+        "{}",
+        sb.log()
+    );
+}
+
+#[test]
+fn add_refuses_a_console_login() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["add", "work", "--", "--console"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::ends_with(
+            "cam: work was not added: Claude Code logged in with /login managed key, not a Claude subscription\n\
+             hint: log in with claude.ai (Pro, Max, Team or Enterprise). Claude Code keeps a Console login \
+             outside the account's dir, so cam can't keep one per account\n",
+        ));
+    assert!(!sb.account_dir("work").exists());
+    assert!(!sb.config.exists());
 }
 
 #[test]
@@ -732,7 +895,7 @@ fn add_sets_up_a_configured_account_that_has_no_dir() {
         .args(["add", "work"])
         .assert()
         .success()
-        .stdout(predicate::str::ends_with(
+        .stdout(predicate::str::contains(
             "added work: logged in as work@example.com (Acme, team)\n",
         ));
     assert_eq!(read(&sb.config), CONFIG);
@@ -748,9 +911,11 @@ fn add_cleans_up_after_a_failed_login() {
         .assert()
         .code(1)
         .stdout("")
-        .stderr(
-            "Login cancelled.\ncam: work was not added: the login didn't finish (exit status 1)\n",
-        );
+        .stderr(format!(
+            "{LOGGING_WORK}Login cancelled.\n\
+             cam: work was not added: the login didn't finish (exit status 1)\n\
+             hint: run `cam add work` to try again\n"
+        ));
     assert!(!sb.account_dir("work").exists());
     assert!(!sb.config.exists());
     assert!(sb.log().ends_with(&format!(
@@ -831,10 +996,28 @@ fn add_warns_when_the_email_is_already_used() {
         .env("FAKE_EMAIL", "Me@Home.org")
         .assert()
         .success()
-        .stderr(
-            "warning: work is logged in as Me@Home.org, the same as system; the browser may have been signed in to the wrong claude.ai account\n\
-             hint: sign it in to the right one, then run `cam login work`\n",
-        );
+        .stderr(format!(
+            "{LOGGING_WORK}Already in use: me@home.org (system).\n\
+             warning: work is logged in as Me@Home.org, the same account as your own login (system): \
+             the browser was probably still signed in to it\n\
+             hint: if work should be another claude.ai account, switch accounts in the browser, then run `cam login work`\n"
+        ));
+}
+
+#[test]
+fn add_allows_the_same_email_in_another_org() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.system_login("me@home.org");
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .env("FAKE_EMAIL", "me@home.org")
+        .env("FAKE_ORG", "Other")
+        .assert()
+        .success()
+        .stderr(format!(
+            "{LOGGING_WORK}Already in use: me@home.org (system).\n"
+        ));
 }
 
 #[test]
@@ -847,9 +1030,10 @@ fn add_checks_the_login_itself_despite_an_api_key() {
         .assert()
         .success()
         .stdout(predicate::str::contains("added work: logged in as work@example.com"))
-        .stderr(
-            "warning: ANTHROPIC_API_KEY is set and outranks the login of \"work\"; unset it to use that account\n",
-        );
+        .stderr(format!(
+            "{LOGGING_WORK}note: ANTHROPIC_API_KEY is set; if you approve it when Claude Code asks, \
+             it's used instead of the login of \"work\" (\"Use custom API key\" in /config)\n"
+        ));
 }
 
 // --- login ---
@@ -865,7 +1049,7 @@ fn login_logs_the_named_account_in_again() {
         .assert()
         .success()
         .stdout("Login successful.\nwork: logged in as new@company.com (Acme, team)\n")
-        .stderr("");
+        .stderr(LOGGING_WORK);
     assert!(read(&dir.join(".claude.json")).contains("new@company.com"));
 }
 
@@ -883,6 +1067,24 @@ fn login_defaults_to_the_account_here() {
             "work (from {})\nLogin successful.\nwork: logged in as work@example.com (Acme, team)\n",
             marker.display()
         ));
+}
+
+#[test]
+fn login_passes_arguments_to_claude() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .args(["login", "--", "--sso"])
+        .assert()
+        .success();
+    assert!(
+        sb.log()
+            .starts_with(&format!("auth login --sso ({})\n", dir.display())),
+        "{}",
+        sb.log()
+    );
 }
 
 #[test]
@@ -914,7 +1116,11 @@ fn a_failed_login_deletes_nothing() {
         .env("FAKE_LOGIN", "fail")
         .assert()
         .code(1)
-        .stderr("Login cancelled.\ncam: the login didn't finish (exit status 1)\n");
+        .stderr(format!(
+            "{LOGGING_WORK}Login cancelled.\n\
+             cam: the login didn't finish (exit status 1)\n\
+             hint: run `cam login work` to try again\n"
+        ));
     assert!(read(&dir.join(".claude.json")).contains("you@company.com"));
     assert!(!sb.log().contains("logout"));
 }
@@ -947,13 +1153,16 @@ fn remove_logs_out_then_deletes_the_dir_and_entry() {
     sb.fake_claude("bin");
     let dir = sb.logged_in("work", "you@company.com");
     sb.cam(&sb.root)
-        .args(["remove", "work"])
+        .args(["remove", "work", "--yes"])
         .assert()
         .success()
         .stdout(format!(
             "removed work: logged out, deleted {} and its config entry\n",
             dir.display()
-        ));
+        ))
+        .stderr(
+            "note: a .claude-account that names work now makes `claude` stop with an error; change it with `cam use`\n",
+        );
     assert!(!dir.exists());
     assert_eq!(read(&sb.config), "[accounts.personal]\n");
     assert_eq!(sb.log(), format!("auth logout ({})\n", dir.display()));
@@ -965,12 +1174,12 @@ fn remove_keeps_everything_if_the_logout_fails() {
     sb.fake_claude("bin");
     let dir = sb.logged_in("work", "you@company.com");
     sb.cam(&sb.root)
-        .args(["remove", "work"])
+        .args(["remove", "work", "-y"])
         .env("FAKE_LOGOUT", "fail")
         .assert()
         .code(1)
         .stderr(
-            "cam: cannot log work out, so nothing was removed: `claude auth logout` failed (exit status 1)\n",
+            "cam: cannot log work out, so nothing was removed: `claude auth logout` failed (exit status 1): Logout failed.\n",
         );
     assert!(dir.join(".claude.json").exists());
     assert_eq!(read(&sb.config), CONFIG);
@@ -981,7 +1190,7 @@ fn remove_without_claude_keeps_the_dir() {
     let sb = Sandbox::new();
     let dir = sb.logged_in("work", "you@company.com");
     sb.cam(&sb.root)
-        .args(["remove", "work"])
+        .args(["remove", "work", "--yes"])
         .assert()
         .code(127)
         .stderr(predicate::str::starts_with("cam: cannot log work out"));
@@ -1001,7 +1210,7 @@ fn remove_handles_partial_state() {
     // A dir without a config entry.
     let dir = sb.logged_in("stray", "x@y.org");
     sb.cam(&sb.root)
-        .args(["remove", "stray"])
+        .args(["remove", "stray", "--yes"])
         .assert()
         .success()
         .stdout(format!(
@@ -1014,7 +1223,51 @@ fn remove_handles_partial_state() {
         .args(["remove", "stray"])
         .assert()
         .code(1)
-        .stderr("cam: nothing to remove: \"stray\" has no config entry and no account dir\n");
+        .stderr(
+            "cam: nothing to remove: \"stray\" has no config entry and no account dir\n\
+             hint: `cam list` shows the accounts\n",
+        );
+    sb.cam(&sb.root)
+        .args(["remove", "wrok"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::ends_with("hint: did you mean `work`?\n"));
+}
+
+#[test]
+fn remove_asks_first() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    // The sandbox's stdin isn't a terminal, so cam can't ask.
+    sb.cam(&sb.root)
+        .args(["remove", "work"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(
+            "cam: not removing \"work\" without asking, and there's no terminal to ask on\n\
+             hint: pass --yes to remove it\n",
+        );
+    assert!(dir.join(".claude.json").exists());
+    assert_eq!(read(&sb.config), CONFIG);
+    assert_eq!(sb.log(), "");
+}
+
+#[test]
+fn remove_names_the_marker_here_that_now_fails() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
+    let marker = sb.marker("w", "work\n");
+    sb.cam(&sb.dir("w/repo"))
+        .args(["remove", "work", "--yes"])
+        .assert()
+        .success()
+        .stderr(format!(
+            "note: {} names work, so `claude` stops with an error under it until you change it with `cam use`\n",
+            marker.display()
+        ));
 }
 
 #[test]
@@ -1025,7 +1278,10 @@ fn remove_never_follows_links_out_of_the_dir() {
     let shared = sb.dir("home/.claude/skills");
     fs::write(shared.join("keep.md"), "mine\n").unwrap();
     symlink(&shared, dir.join("skills")).unwrap();
-    sb.cam(&sb.root).args(["remove", "work"]).assert().success();
+    sb.cam(&sb.root)
+        .args(["remove", "work", "--yes"])
+        .assert()
+        .success();
     assert!(!dir.exists());
     assert_eq!(read(&shared.join("keep.md")), "mine\n");
 }
@@ -1263,8 +1519,25 @@ fn exec_warns_about_variables_that_outrank_the_login() {
         .success()
         .stdout(launched(&claude, "", &work.display().to_string(), "work", 1))
         .stderr(
-            "warning: ANTHROPIC_API_KEY is set and outranks the login of \"work\"; unset it to use that account\n\
+            "note: ANTHROPIC_API_KEY is set; if you approve it when Claude Code asks, it's used instead of \
+             the login of \"work\" (\"Use custom API key\" in /config)\n\
              warning: CLAUDE_CODE_OAUTH_TOKEN is set and outranks the login of \"work\"; unset it to use that account\n",
+        );
+}
+
+#[test]
+fn exec_in_print_mode_warns_about_an_api_key() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root)
+        .args(["exec", "-p", "hi"])
+        .env("CAM_ACCOUNT", "work")
+        .env("ANTHROPIC_API_KEY", "sk-ant-api03-FAKE")
+        .assert()
+        .success()
+        .stderr(
+            "warning: ANTHROPIC_API_KEY is set and outranks the login of \"work\"; unset it to use that account\n",
         );
 }
 
@@ -1405,28 +1678,38 @@ fn exec_help_is_cams() {
         ));
 }
 
-// --- shim ---
+// --- init and plain `claude` ---
+
+/// What `cam init zsh` prints after the `PATH` line: clap's script, run
+/// only once `compinit` has defined `compdef`.
+fn zsh_completions(code: &str) -> &str {
+    let at = code
+        .find("if (( $+functions[compdef] )); then\n")
+        .unwrap_or_else(|| panic!("no completions in:\n{code}"));
+    &code[at..]
+}
 
 #[test]
-fn shim_install_creates_the_shim_and_prints_the_path_line() {
+fn init_makes_the_link_and_puts_its_dir_first() {
     let sb = Sandbox::new();
-    sb.fake_claude("bin");
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .env("SHELL", "/bin/zsh")
+    let assert = sb
+        .cam(&sb.root)
+        .args(["init", "zsh"])
         .assert()
         .success()
-        .stdout(format!(
-            "installed {shim} -> {CAM}\n\
-             \n\
-             Next, put the shim dir first on PATH. Add this line to the end of ~/.zshrc, below any line that adds {bin}:\n\
-             \n    export PATH=\"$HOME/.local/share/cam/shims:$PATH\"\n\
-             \n\
-             Then open a new terminal. `cam which` shows the account `claude` will use.\n",
-            shim = sb.shims().join("claude").display(),
-            bin = sb.bin().display(),
-        ))
         .stderr("");
+    let code = stdout_of(&assert);
+    assert!(
+        code.starts_with(&format!(
+            "export PATH='{}:{}'\nif (( $+functions[compdef] )); then\n",
+            sb.shims().display(),
+            sb.bin().display()
+        )),
+        "{code}"
+    );
+    let completions = zsh_completions(&code);
+    assert!(completions.contains("compdef _cam cam"), "{code}");
+    assert!(completions.ends_with("fi\n"), "{code}");
     assert_eq!(
         fs::read_link(sb.shims().join("claude")).unwrap(),
         Path::new(CAM)
@@ -1434,13 +1717,161 @@ fn shim_install_creates_the_shim_and_prints_the_path_line() {
 }
 
 #[test]
-fn shim_runs_claude_with_the_account() {
+fn init_moves_the_dir_to_the_front() {
     let sb = Sandbox::new();
-    let claude = sb.fake_claude("bin");
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
+    let assert = sb
+        .cam(&sb.root)
+        .args(["init", "bash"])
+        .env("PATH", sb.path(&[&sb.bin(), &sb.shims(), &sb.bin()]))
         .assert()
         .success();
+    assert!(stdout_of(&assert).starts_with(&format!(
+        "export PATH='{shims}:{bin}:{bin}'\n",
+        shims = sb.shims().display(),
+        bin = sb.bin().display()
+    )));
+}
+
+#[test]
+fn init_for_fish() {
+    let sb = Sandbox::new();
+    let assert = sb.cam(&sb.root).args(["init", "fish"]).assert().success();
+    let code = stdout_of(&assert);
+    assert!(
+        code.starts_with(&format!(
+            "set -gx PATH '{}' '{}'\n",
+            sb.shims().display(),
+            sb.bin().display()
+        )),
+        "{code}"
+    );
+    assert!(
+        code.contains("complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'work'"),
+        "{code}"
+    );
+}
+
+#[test]
+fn init_in_bash_sends_plain_claude_through_cam() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    let work = sb.logged_in("work", "you@company.com");
+    sb.marker("w", "work\n");
+    sb.command(Path::new("/bin/bash"), &sb.dir("w/repo"))
+        .args([
+            "--norc",
+            "--noprofile",
+            "-c",
+            r#"eval "$("$CAM" init bash)" && command -v claude && complete -p cam >/dev/null && claude hi"#,
+        ])
+        .env("CAM", CAM)
+        .assert()
+        .success()
+        .stdout(format!(
+            "{}\n{}",
+            sb.shims().join("claude").display(),
+            launched(&claude, " [hi]", &work.display().to_string(), "work", 1)
+        ))
+        .stderr("");
+}
+
+#[test]
+fn init_in_zsh_sends_plain_claude_through_cam() {
+    let zsh = Path::new("/bin/zsh");
+    if !zsh.exists() {
+        return;
+    }
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let script = r#"eval "$("$CAM" init zsh)" && command -v claude"#;
+    // Without compinit, the completions wait quietly.
+    sb.command(zsh, &sb.root)
+        .args(["-f", "-c", script])
+        .env("CAM", CAM)
+        .assert()
+        .success()
+        .stdout(format!("{}\n", sb.shims().join("claude").display()))
+        .stderr("");
+    // With it, they load.
+    sb.command(zsh, &sb.root)
+        .args([
+            "-f",
+            "-c",
+            r#"autoload -Uz compinit && compinit -u -D && eval "$("$CAM" init zsh)" && print -r -- $_comps[cam]"#,
+        ])
+        .env("CAM", CAM)
+        .assert()
+        .success()
+        .stdout("_cam\n")
+        .stderr("");
+}
+
+#[test]
+fn init_replaces_an_old_link_quietly() {
+    let sb = Sandbox::new();
+    fs::create_dir_all(sb.shims()).unwrap();
+    let old = sb.root.join("old-build/cam");
+    symlink(&old, sb.shims().join("claude")).unwrap();
+    sb.cam(&sb.root)
+        .args(["init", "zsh"])
+        .assert()
+        .success()
+        .stderr("");
+    assert_eq!(
+        fs::read_link(sb.shims().join("claude")).unwrap(),
+        Path::new(CAM)
+    );
+    // Run again: nothing to change.
+    sb.cam(&sb.root)
+        .args(["init", "zsh"])
+        .assert()
+        .success()
+        .stderr("");
+}
+
+#[test]
+fn init_points_at_the_path_spelling_of_cam() {
+    let sb = Sandbox::new();
+    let brew = sb.dir("brew/bin");
+    symlink(CAM, brew.join("cam")).unwrap();
+    sb.cam(&sb.root)
+        .args(["init", "zsh"])
+        .env("PATH", sb.path(&[&brew, &sb.bin()]))
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_link(sb.shims().join("claude")).unwrap(),
+        brew.join("cam")
+    );
+}
+
+#[test]
+fn init_never_replaces_a_claude_that_isnt_cams() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("home/.local/share/cam/shims");
+    let before = read(&claude);
+    let assert = sb
+        .cam(&sb.root)
+        .args(["init", "zsh"])
+        .assert()
+        .success()
+        .stderr(format!(
+            "cam: warning: {} already exists and isn't cam's link, so cam leaves it alone\n\
+             hint: plain `claude` can't go through cam until you move it away\n",
+            claude.display()
+        ));
+    // No PATH line, but the completions still load.
+    let code = stdout_of(&assert);
+    assert!(!code.contains("PATH"), "{code}");
+    assert_eq!(zsh_completions(&code), code);
+    assert_eq!(read(&claude), before);
+}
+
+#[test]
+fn plain_claude_runs_with_the_account() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.cam(&sb.root).args(["init", "zsh"]).assert().success();
     let work = sb.logged_in("work", "you@company.com");
     sb.marker("work", "work\n");
     // Every argument reaches claude, even ones cam would otherwise parse.
@@ -1460,13 +1891,10 @@ fn shim_runs_claude_with_the_account() {
 }
 
 #[test]
-fn shim_system_and_exit_code() {
+fn plain_claude_system_and_exit_code() {
     let sb = Sandbox::new();
     let claude = sb.fake_claude("bin");
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .assert()
-        .success();
+    sb.cam(&sb.root).args(["init", "zsh"]).assert().success();
     sb.command(&sb.shims().join("claude"), &sb.root)
         .env("PATH", sb.path(&[&sb.shims(), &sb.bin()]))
         .env("FAKE_EXIT", "4")
@@ -1476,12 +1904,9 @@ fn shim_system_and_exit_code() {
 }
 
 #[test]
-fn shim_without_a_real_claude_fails_instead_of_looping() {
+fn plain_claude_without_a_real_one_fails_instead_of_looping() {
     let sb = Sandbox::new();
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .assert()
-        .success();
+    sb.cam(&sb.root).args(["init", "zsh"]).assert().success();
     sb.command(&sb.shims().join("claude"), &sb.root)
         .env("PATH", sb.path(&[&sb.shims()]))
         .assert()
@@ -1492,168 +1917,31 @@ fn shim_without_a_real_claude_fails_instead_of_looping() {
 }
 
 #[test]
-fn shim_install_reports_when_the_shim_is_already_first() {
+fn plain_claude_says_how_to_run_without_cam() {
     let sb = Sandbox::new();
     sb.fake_claude("bin");
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
+    sb.cam(&sb.root).args(["init", "zsh"]).assert().success();
+    sb.marker("a", "wrok\n");
+    let escape =
+        "hint: `CAM_ACCOUNT=system claude` runs Claude Code with its own setup, without cam\n";
+    sb.command(&sb.shims().join("claude"), &sb.dir("a"))
         .env("PATH", sb.path(&[&sb.shims(), &sb.bin()]))
         .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Plain `claude` now runs through cam: the shim dir comes first on PATH.\n",
-        ));
-}
-
-#[test]
-fn shim_install_reports_when_the_shim_comes_too_late() {
-    let sb = Sandbox::new();
-    let claude = sb.fake_claude("bin");
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .env("PATH", sb.path(&[&sb.bin(), &sb.shims()]))
-        .env("SHELL", "/usr/bin/fish")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(format!(
-            "The shim dir is on PATH, but after {}, so plain `claude` still skips cam.\n",
-            claude.display()
-        )))
-        .stdout(predicate::str::contains(
-            "    set -gx PATH \"$HOME/.local/share/cam/shims\" $PATH\n",
-        ));
-}
-
-#[test]
-fn shim_install_is_idempotent() {
-    let sb = Sandbox::new();
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .assert()
-        .success();
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .assert()
-        .success()
-        .stdout(predicate::str::starts_with(format!(
-            "already installed: {} -> {CAM}\n",
-            sb.shims().join("claude").display()
-        )));
-}
-
-#[test]
-fn shim_install_replaces_an_old_shim() {
-    let sb = Sandbox::new();
-    fs::create_dir_all(sb.shims()).unwrap();
-    let old = sb.root.join("old-build/cam");
-    symlink(&old, sb.shims().join("claude")).unwrap();
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .assert()
-        .success()
-        .stdout(predicate::str::starts_with(format!(
-            "replaced {} -> {CAM} (it pointed at {})\n",
-            sb.shims().join("claude").display(),
-            old.display()
-        )));
-}
-
-#[test]
-fn shim_install_points_at_the_path_spelling_of_cam() {
-    let sb = Sandbox::new();
-    let brew = sb.dir("brew/bin");
-    symlink(CAM, brew.join("cam")).unwrap();
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .env("PATH", sb.path(&[&brew, &sb.bin()]))
-        .assert()
-        .success();
-    assert_eq!(
-        fs::read_link(sb.shims().join("claude")).unwrap(),
-        brew.join("cam")
-    );
-}
-
-#[test]
-fn shim_install_never_replaces_a_real_claude() {
-    let sb = Sandbox::new();
-    let claude = sb.fake_claude("bin");
-    let before = read(&claude);
-    sb.cam(&sb.root)
-        .args(["shim", "install", "--dir"])
-        .arg(sb.bin())
+        .code(1)
+        .stderr(predicate::str::contains("did you mean `work`?"))
+        .stderr(predicate::str::ends_with(escape));
+    // `cam exec` and `CAM_ACCOUNT=system` itself don't need it.
+    sb.cam(&sb.dir("a"))
+        .arg("exec")
         .assert()
         .code(1)
-        .stdout("")
-        .stderr(format!(
-            "cam: {} already exists and isn't a cam shim, so cam leaves it alone\nhint: remove it yourself, or pick another --dir\n",
-            claude.display()
-        ));
-    assert_eq!(read(&claude), before);
-}
-
-#[test]
-fn shim_install_notes_a_missing_claude() {
-    let sb = Sandbox::new();
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .assert()
-        .success()
-        .stderr(
-            "note: no real `claude` found on PATH yet; install Claude Code, or set CAM_CLAUDE_BIN\n",
-        );
-}
-
-#[test]
-fn shim_install_with_relative_dir() {
-    let sb = Sandbox::new();
-    sb.cam(&sb.root)
-        .args(["shim", "install", "--dir", "my-shims"])
-        .assert()
-        .success();
-    assert_eq!(
-        fs::read_link(sb.root.join("my-shims/claude")).unwrap(),
-        Path::new(CAM)
-    );
-}
-
-#[test]
-fn shim_uninstall_removes_only_a_shim() {
-    let sb = Sandbox::new();
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .assert()
-        .success();
-    sb.cam(&sb.root)
-        .args(["shim", "uninstall"])
+        .stderr(predicate::str::contains("CAM_ACCOUNT=system claude").not());
+    sb.command(&sb.shims().join("claude"), &sb.dir("a"))
         .env("PATH", sb.path(&[&sb.shims(), &sb.bin()]))
+        .env("CAM_ACCOUNT", "system")
         .assert()
-        .success()
-        .stdout(format!("removed {}\n", sb.shims().join("claude").display()))
-        .stderr(format!(
-            "note: {} is still on PATH; you can remove that line from your shell's startup file\n",
-            sb.shims().display()
-        ));
-    sb.cam(&sb.root)
-        .args(["shim", "uninstall"])
-        .assert()
-        .code(1)
-        .stderr(format!(
-            "cam: no shim at {}\n",
-            sb.shims().join("claude").display()
-        ));
-
-    let claude = sb.fake_claude("bin");
-    sb.cam(&sb.root)
-        .args(["shim", "uninstall", "--dir"])
-        .arg(sb.bin())
-        .assert()
-        .code(1)
-        .stderr(predicate::str::contains("isn't a cam shim"));
-    assert!(claude.is_file());
+        .success();
 }
-
-// --- whoami ---
 
 // --- whoami ---
 
@@ -1774,10 +2062,7 @@ fn whoami_without_an_account_dir_fails() {
 fn doctor_all_good() {
     let sb = Sandbox::new();
     let claude = sb.fake_claude("bin");
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .assert()
-        .success();
+    sb.cam(&sb.root).args(["init", "zsh"]).assert().success();
     sb.system_login("me@home.org");
     sb.logged_in("work", "you@company.com");
     sb.logged_in("personal", "personal@home.org");
@@ -1793,7 +2078,7 @@ fn doctor_all_good() {
         any_days(&stdout_of(&assert)),
         format!(
             "ok    claude: {claude}\n\
-             ok    shim: plain `claude` runs through cam ({shim})\n\
+             ok    path: plain `claude` runs through cam ({shim})\n\
              ok    config: {config}, 2 accounts\n\
              ok    system: logged in as me@home.org (Acme, team), login expires 2099-01-01 (in N days)\n\
              ok    account personal: logged in as personal@home.org (Acme, team), login expires 2099-01-01 (in N days)\n\
@@ -1909,7 +2194,7 @@ fn doctor_warns_about_a_login_about_to_expire_and_the_same_account() {
     assert!(
         out.contains(
             "warn  same account: system and personal are both logged in as me@home.org\n      \
-             hint: sign the browser in to the right claude.ai account, then run `cam login personal`\n"
+             hint: if personal should be another claude.ai account, switch accounts in the browser, then run `cam login personal`\n"
         ),
         "{out}"
     );
@@ -1930,23 +2215,24 @@ fn doctor_warns_about_an_exported_config_dir() {
 }
 
 #[test]
-fn doctor_flags_a_shim_that_comes_too_late() {
+fn doctor_flags_plain_claude_skipping_cam() {
     let sb = Sandbox::with_config(None);
     let claude = sb.fake_claude("bin");
-    sb.cam(&sb.root)
-        .args(["shim", "install"])
-        .assert()
-        .success();
+    sb.cam(&sb.root).args(["init", "zsh"]).assert().success();
     sb.cam(&sb.root)
         .arg("doctor")
         .env("PATH", sb.path(&[&sb.bin(), &sb.shims()]))
+        .env("SHELL", "/bin/zsh")
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(
-            "warn  shim: installed in {}, but plain `claude` runs {} first, without cam\n      \
-             hint: run `cam shim install` to see the line to add or move\n",
-            sb.shims().display(),
-            claude.display()
+            "warn  path: plain `claude` runs {}, not cam\n      \
+             hint: add `eval \"$(cam init zsh)\"` to the end of ~/.zshrc, then open a new terminal; \
+             it must come after any line that adds {}. \
+             If you'd rather not use cam for plain `claude`, delete {}\n",
+            claude.display(),
+            sb.bin().display(),
+            sb.shims().join("claude").display()
         )));
 }
 
