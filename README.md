@@ -157,6 +157,21 @@ Both ask `claude auth status`, so they report what Claude Code itself says. `doc
 
 It exits non-zero if a check fails. Neither command reads a credential.
 
+### Showing the account in Claude Code
+
+cam sets `CAM_ACTIVE_ACCOUNT` in the environment of the `claude` it starts, and Claude Code passes it on to a [status line](https://code.claude.com/docs/en/statusline) command. To see the account under the prompt, add this to the account's `settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "echo \"${CAM_ACTIVE_ACCOUNT:-system}\""
+  }
+}
+```
+
+Each account has its own `settings.json` for now, at `~/.local/share/cam/accounts/<name>/settings.json`, and `system`'s is `~/.claude/settings.json`. If you already have a status line script, have it print `${CAM_ACTIVE_ACCOUNT:-system}` too.
+
 ### Shell completions
 
 `cam init` loads completions with your account names, so `cam use <TAB>` offers them. Accounts you add later show up in new shells. In zsh they need `compinit`, which frameworks like Oh My Zsh run for you: the `cam init` line has to come after it.

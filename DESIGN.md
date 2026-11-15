@@ -43,6 +43,7 @@ Observed with CLI 2.1.325 in an empty config dir (2026-11-15):
 - `claude auth status --json` exits 1 when not logged in, and still prints its JSON: `loggedIn: false`, `authMethod: "none"`. So cam reads the JSON whatever the exit code.
 - With `ANTHROPIC_API_KEY` set, it reports `loggedIn: true`, `authMethod: "api_key"` and `apiKeySource: "ANTHROPIC_API_KEY"`, with no email.
 - `claude auth logout` in a dir that never logged in succeeds. Running these leaves `.claude.json`, `.claude.json.lock` and `backups/` in the dir.
+- A `SessionStart` hook saw `CAM_ACTIVE_ACCOUNT`, `CAM_SHIM_DEPTH` and `CLAUDE_CONFIG_DIR` from claude's environment (a logged-out `claude -p` in a scratch config dir). In the CLI's code, the status line command runs through the same runner as hooks, whose environment starts from `process.env`, minus a few of Claude Code's own variables (and, in a scrubbing mode, names and values that look like secrets), plus `CLAUDE_PROJECT_DIR`, `COLUMNS` and `LINES`. So a status line can show `$CAM_ACTIVE_ACCOUNT`; the README has the snippet. Not yet seen in a status line itself *(verify)*.
 
 Rejected: the undocumented `CLAUDE_SECURESTORAGE_CONFIG_DIR`, which separates only the credential slot. With a shared `.claude.json`, a refresh merges one account's profile fields into the other's `oauthAccount` without checking `accountUuid`, and so does the org-roles fetch.
 
@@ -336,7 +337,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 8. **Sharing (next):** first, test which write paths keep a file link. Then the four groups, the picker and `--share`, `share` (moving copies aside) and `unshare` (with `--copy`), links topped up on launch with `exec`'s warning, and `doctor`'s link checks.
 9. A release (cargo-dist / Homebrew tap). Not planned yet.
 
-Later ideas: Linux (the design no longer needs a secret store, so it may just work *(verify)*), a status-line snippet for the README that reads `CAM_ACTIVE_ACCOUNT` (the docs don't say whether a `statusLine` command inherits claude's environment *(verify)*), and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
+Later ideas: Linux (the design no longer needs a secret store, so it may just work *(verify)*), and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
 
 ## Open questions
 
