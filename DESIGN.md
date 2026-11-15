@@ -1,6 +1,6 @@
 # cam — Claude Account Manager
 
-Status: redesign to native logins and opt-in sharing decided 2026-11-15 (M7 and M8, not built yet). The code still runs token mode: milestones 1–5 (resolution, config, token store, `add`/`remove`/`list`, `use`/`unuse`/`which`, `exec`, the shim, `whoami`/`doctor`) and shell completions. No release yet. · Written 2026-11-11, redesigned 2026-11-15
+Status: milestones 1–7 built. Accounts log in with Claude Code's own login (M7, 2026-11-15). Opt-in sharing (M8) is next. No release yet. · Written 2026-11-11, redesigned 2026-11-15
 
 Pick the Claude Code account **per folder**, the way `.nvmrc` / `.node-version` pick a Node version with fnm. A `.claude-account` file names an account. The nearest one up the folder tree wins. `claude` starts logged in as that account. Each account starts with a Claude Code setup of its own, and you choose which parts of your usual setup it shares.
 
@@ -36,6 +36,11 @@ Observed with CLI 2.1.325 (spike, 2026-11-14):
 - From the CLI's code, not yet seen in the Keychain *(verify)*: the login is stored as a generic password with service `Claude Code-credentials`, plus `-<first 8 hex digits of sha256(CLAUDE_CONFIG_DIR)>` when the variable is set. So the dir's spelling matters, and cam must always pass the same one.
 - The system login's `loginExpiresAt` moved from 2026-11-16 (seen 2026-11-12) to 2026-12-11, so it seems to be extended as the login is used *(verify for an idle account)*.
 
+Observed with CLI 2.1.325 in an empty config dir (2026-11-15):
+- `claude auth status --json` exits 1 when not logged in, and still prints its JSON: `loggedIn: false`, `authMethod: "none"`. So cam reads the JSON whatever the exit code.
+- With `ANTHROPIC_API_KEY` set, it reports `loggedIn: true`, `authMethod: "api_key"` and `apiKeySource: "ANTHROPIC_API_KEY"`, with no email.
+- `claude auth logout` in a dir that never logged in succeeds. Running these leaves `.claude.json`, `.claude.json.lock` and `backups/` in the dir.
+
 Rejected: the undocumented `CLAUDE_SECURESTORAGE_CONFIG_DIR`, which separates only the credential slot. With a shared `.claude.json`, a refresh merges one account's profile fields into the other's `oauthAccount` without checking `accountUuid`, and so does the org-roles fetch.
 
 ### Token mode (M1–M6, dropped 2026-11-15)
@@ -53,7 +58,7 @@ cam first passed a long-lived `claude setup-token` token as `CLAUDE_CODE_OAUTH_T
   - It shares only the groups chosen for it (see Sharing). Nothing, by default.
   - Always its own, shared or not: `.claude.json` (the account's identity, user-scope MCP servers, trusted folders and first-run state), its login, the org's managed settings and policy caches, and run-time state (`sessions`, `session-env`, `shell-snapshots`, `cache`, `stats-cache.json` and the like).
 - **Names** match `^[a-z0-9][a-z0-9_-]*$`. `system` is reserved. `none`, the reserved name in token mode, is an ordinary name now, so an old `none` marker fails as an unknown account instead of meaning something else.
-- **Migrating from token mode:** before installing M7, run `cam remove <name>` for each account with the old build. It deletes the Keychain item under service `cam`, which the new build no longer knows about. The new build rejects a config that still has `token_created` or `default`.
+- **Migrating from token mode:** before installing M7, run `cam remove <name>` for each account with the old build. It deletes the Keychain item under service `cam`, which the new build no longer knows about. The new build rejects a config that still has `token_created` or `default`, with a hint that names the lines to delete and the `security delete-generic-password -s cam -a <name>` command for a token left in the Keychain.
 
 ## Sharing (M8)
 
@@ -133,15 +138,16 @@ system (no CAM_ACCOUNT or .claude-account)
 | `cam completions <shell>` | Prints a completion script for bash, zsh, fish, elvish or PowerShell, with account names filled in. |
 
 ### `add`
-- **Checks first:** the name is valid and not `system`, the config parses, the account isn't configured and its dir doesn't exist, and the real `claude` is found (as `exec` finds it). Nothing is created before these pass.
+- **Checks first:** the name is valid and not `system`, the config parses, nothing is at the account's dir yet, and the real `claude` is found (as `exec` finds it). Nothing is created before these pass. A config entry without a dir is fine: `add` sets that account up again, which is what the hint for a missing dir says to do.
 - **Asks what to share** (M8): the picker, or `--share` (see Sharing).
 - **Creates** the dir and the links of the groups it shares, then runs `claude auth login` with `CLAUDE_CONFIG_DIR` set and the terminal passed through. It passes no flags, so the user sees Claude Code's own choices and picks the account in the browser.
-- **Confirms** with `claude auth status --json`: it must say `loggedIn` with an email. Then it records `[accounts.<name>]` (with `share`, if any) in the config and prints `added work: logged in as you@company.com (Acme, team)`.
+- **While the login runs,** cam ignores Ctrl-C and Ctrl-\\, as `system(3)` does. They still reach `claude`, which stops, and cam is left to clean up.
+- **Confirms** with `claude auth status --json`, minus the variables that outrank a login, so it checks the login itself: it must say `loggedIn` with `authMethod: "claude.ai"`. Then it records `[accounts.<name>]` (with `share`, if any) in the config and prints `added work: logged in as you@company.com (Acme, team)`.
 - **If the login fails or is cancelled,** it runs `claude auth logout` for the dir (best effort), deletes the dir and writes no config entry. So a retry starts clean.
 - **Same account twice:** if the email matches the system login's or another account's (read from their `.claude.json`), it warns that the browser may have been signed in to the wrong claude.ai account. The fix: sign the browser in to the right account, then run `cam login <name>`.
 
 ### `login`
-- **Which account:** `<name>`, or the one that applies here, resolved as `exec` resolves it. cam prints the `which` line first, so logging in from the wrong folder is obvious. `system` is allowed: that's plain `claude auth login` on Claude Code's own setup.
+- **Which account:** `<name>`, or the one that applies here, resolved as `exec` resolves it. Without a name, cam prints the `which` line first, so logging in from the wrong folder is obvious. `system` is allowed: that's plain `claude auth login` on Claude Code's own setup.
 - **Checks first:** the name is configured (or `system`), its dir exists (or it fails with the `cam add <name>` hint, as `exec` does), and the real `claude` is found. Then it tops up the links of the groups the account shares.
 - **Runs** `claude auth login` with the environment `exec` would give `claude`, the terminal passed through and no flags. Claude Code replaces the account's login *(verify that it replaces one that's still valid rather than refusing)*.
 - **Confirms** with `claude auth status --json` and prints `work: logged in as you@company.com (Acme, team)`, with the same-account warning as `add`.
@@ -156,7 +162,7 @@ system (no CAM_ACCOUNT or .claude-account)
 - It works on partial state (only a dir, or only an entry), and fails if there's neither.
 
 ### `list`
-- One row per account, `system` first: the name, and the email from `oauthAccount.emailAddress` in its `.claude.json` (`~/.claude.json` for `system`), or `-`. From M8, a third column lists the groups it shares.
+- One row per account, `system` first: the name, and the email from `oauthAccount.emailAddress` in its `.claude.json`, or `-`. For `system` that's `~/.claude.json`, or the one in a `CLAUDE_CONFIG_DIR` the user exported. From M8, a third column lists the groups it shares.
 - It reads files only and never runs `claude`, so it's instant. That's Claude Code's last record, not a live check. `whoami` and `doctor` ask Claude Code.
 
 ### Config writes
@@ -211,7 +217,9 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - Because it asks Claude Code in claude's own environment, an `ANTHROPIC_API_KEY` that outranks the login shows up as what Claude Code would really use. It also warns about it on stderr, after the report.
 - Inside a cam session (`CAM_ACTIVE_ACCOUNT` set), it adds which account that session runs as.
 - From M8, a `shares:` line lists the account's groups.
+- Within 3 days of expiry, it warns with the `cam login <name>` hint.
 - Not logged in, or expired: it prints the report, then fails with the `cam login <name>` hint.
+- If something outranks the login, the login line names it (`ANTHROPIC_API_KEY, which Claude Code uses instead of a login`), and it doesn't fail.
 
 ### Completions
 - **Static scripts from `clap_complete`,** not its run-time mode. That mode sits behind an `unstable-dynamic` feature whose API can change between minor versions. With static scripts, nothing runs cam while completing.
@@ -223,11 +231,11 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - The output is redacted like everything else.
 
 ### Doctor checks
-`cam doctor` prints one line per check, marked `ok`, `info`, `warn` or `fail`, with `hint:` lines indented below. Then comes a tally (`no problems found`, `1 warning`, `2 problems, 1 warning`). Any `fail` makes it exit 1, with the tally as the error; warnings alone exit 0. It runs `claude auth status` once for `system` and once per account (about 0.4 s each), and never reads a credential. In order:
+`cam doctor` prints one line per check, marked `ok`, `info`, `warn` or `fail`, with `hint:` lines indented below. Then comes a tally (`no problems found`, `1 warning`, `2 problems, 1 warning`). Any `fail` makes it exit 1, with the tally as the error; warnings alone exit 0. It runs `claude auth status` once for `system` and once per account (about 0.4 s each), minus the variables that outrank a login, so it checks each login itself. It never reads a credential. In order:
 - **claude:** the real `claude`, found as `exec` finds it.
 - **shim:** what plain `claude` runs: the first executable `claude` on `PATH`. `ok` if that's a cam shim or cam itself. `warn` if a shim is installed in the default dir but isn't reached, with a pointer to `cam shim install`, which prints the line to fix. `info` if there's no shim: it's optional, and `cam exec` works without it.
 - **config:** parses, with the number of accounts. A missing file or no accounts is `info`.
-- **system:** who Claude Code's own setup is logged in as. Not logged in is `info`, since someone may use only cam accounts.
+- **system:** who Claude Code's own setup is logged in as. Not logged in is `info`, since someone may use only cam accounts, and an expiring or expired login is `warn`.
 - **account `<name>`,** one per configured account:
   - The dir exists (`fail` if not).
   - From M8, for each group the account shares, each entry is a link to its place in `~/.claude`. A missing link is `warn` (the next launch adds it). A real file or folder in its place is `warn`, naming it: that part isn't shared.
@@ -278,11 +286,18 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 
 ## Crates
 
-`clap` (derive), `clap_complete`, `serde` + `toml` for reading, `toml_edit` for writing, `serde_json` (for `auth status` and `.claude.json`), `dirs`, `anyhow`, `thiserror` (typed errors that tests can match on). Dates use a small built-in civil-date routine instead of a date crate. For tests: `assert_cmd`, `predicates`, `tempfile`. M7 drops `security-framework` and `rpassword`. M8 adds a multi-select picker, such as `dialoguer`.
+`clap` (derive), `clap_complete`, `serde` + `toml` for reading, `toml_edit` for writing, `serde_json` (for `auth status` and `.claude.json`), `dirs`, `anyhow`, `thiserror` (typed errors that tests can match on). Dates use a small built-in civil-date routine instead of a date crate. For tests: `assert_cmd`, `predicates`, `tempfile`. M7 dropped `security-framework` and `rpassword`, and added `libc` to ignore Ctrl-C while `claude auth login` runs. M8 adds a multi-select picker, such as `dialoguer`.
 
 ## Testing
 
-- **Tests never run the real `claude`.** A fake `claude` script on the sandbox `PATH` handles `auth login` (writes a fake `oauthAccount` into `$CLAUDE_CONFIG_DIR/.claude.json`), `auth status --json` (reports from that file) and `auth logout` (removes it). It also prints its argv, `CLAUDE_CONFIG_DIR`, `CAM_ACTIVE_ACCOUNT` and `CAM_SHIM_DEPTH`. Failure modes, like a cancelled login, are switched on by files in the sandbox.
+- **Tests never run the real `claude`.** A fake `claude` script on the sandbox `PATH`, written with shell builtins only, keeps a fake login in `$CLAUDE_CONFIG_DIR`, or in `$HOME` for `system`:
+  - `auth login` writes a fake `oauthAccount` into `.claude.json`.
+  - `auth status --json` reports from it, or reports an API key when `ANTHROPIC_API_KEY` is set, as the real one does.
+  - `auth logout` clears it.
+  - Each `auth` call is logged to `$FAKE_LOG`, so tests can check what ran, with which dir and in what order.
+  - Any other call prints its argv, `CLAUDE_CONFIG_DIR`, `CAM_ACTIVE_ACCOUNT` and `CAM_SHIM_DEPTH`.
+  - Variables switch on the other cases: `FAKE_LOGIN=fail` or `nothing`, `FAKE_LOGOUT=fail`, `FAKE_EMAIL` and `FAKE_EXPIRES`.
+- Ctrl-C during `add` was checked by hand, by sending SIGINT to the process group the way a terminal does: cam logged out and deleted the dir.
 - The sandbox clears the environment and sets its own `HOME` and `PATH`, so the real `~/.claude`, the real `claude` and the real Keychain are out of reach.
 - **Resolution unit tests** on temp directory trees: nearest wins, `system` overrides a parent, env beats file, invalid or unknown names fail.
 - **Sharing (M8):** only the chosen groups are linked, links are topped up on launch, a real file is never replaced, `unshare` removes only links, and `remove` never follows one, so the shared targets survive. Tests choose through `--share` and a stdin that isn't a terminal. The picker itself isn't driven by tests.
@@ -298,8 +313,8 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 4. Shim mode, `shim install`/`uninstall`.
 5. `whoami` and `doctor`.
 6. Shell completions.
-7. **Native logins (next):** an account is an empty config dir with its own login, and shares nothing yet. `add`/`login`/`remove` through `claude auth`, `system` in place of `none`, no `default`, `list`/`whoami`/`doctor` from Claude Code's own record. The Keychain store, the token prompt and `token_created` go.
-8. **Sharing:** first, test which write paths keep a file link. Then the four groups, the picker and `--share`, `share`/`unshare`, links topped up on launch, and `doctor`'s link checks.
+7. **Native logins (done 2026-11-15):** an account is an empty config dir with its own login, and shares nothing yet. `add`/`login`/`remove` through `claude auth`, `system` in place of `none`, no `default`, `list`/`whoami`/`doctor` from Claude Code's own record. The Keychain store, the token prompt and `token_created` go.
+8. **Sharing (next):** first, test which write paths keep a file link. Then the four groups, the picker and `--share`, `share`/`unshare`, links topped up on launch, and `doctor`'s link checks.
 9. A release (cargo-dist / Homebrew tap). Not planned yet.
 
 Later ideas: Linux (the design no longer needs a secret store, so it may just work *(verify)*), a prompt/status-line snippet that reads `CAM_ACTIVE_ACCOUNT`, and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).

@@ -1,15 +1,15 @@
-//! What makes Claude Code ignore the token cam passes. Per
+//! What makes Claude Code ignore an account's login. Per
 //! https://code.claude.com/docs/en/authentication.md#authentication-precedence,
-//! these outrank `CLAUDE_CODE_OAUTH_TOKEN` (and `/login`): a cloud-provider
-//! switch, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` and `apiKeyHelper`.
-//! A settings file's `env` can also replace the token itself, because Claude
-//! Code writes `env` entries over the inherited environment.
+//! these outrank `/login`: a cloud-provider switch, `ANTHROPIC_AUTH_TOKEN`,
+//! `ANTHROPIC_API_KEY`, `apiKeyHelper` and `CLAUDE_CODE_OAUTH_TOKEN`. A
+//! settings file's `env` counts too, because Claude Code writes `env`
+//! entries over the inherited environment.
 //!
 //! Only names are ever reported, never values: they can be secrets.
 
 use std::ffi::OsString;
 
-use crate::launch::{self, ENV_TOKEN};
+use crate::launch;
 
 /// The cloud-provider switches and the provider each one selects.
 pub const CLOUD: [(&str, &str); 3] = [
@@ -20,7 +20,8 @@ pub const CLOUD: [(&str, &str); 3] = [
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Conflict {
-    /// `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`, set and non-empty.
+    /// `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` or
+    /// `CLAUDE_CODE_OAUTH_TOKEN`, set and non-empty.
     Credential(&'static str),
     /// A cloud-provider switch that is on.
     Cloud {
@@ -29,8 +30,6 @@ pub enum Conflict {
     },
     /// `apiKeyHelper` in a settings file.
     ApiKeyHelper,
-    /// `CLAUDE_CODE_OAUTH_TOKEN` in a settings file's `env`.
-    Token,
 }
 
 impl Conflict {
@@ -39,23 +38,17 @@ impl Conflict {
         match self {
             Self::Credential(var) | Self::Cloud { var, .. } => var,
             Self::ApiKeyHelper => "apiKeyHelper",
-            Self::Token => ENV_TOKEN,
         }
     }
 
-    /// What it does to the account cam picks, as a clause.
+    /// What it does to the login, as a clause.
     pub fn effect(&self) -> String {
         match self {
-            Self::Credential(_) => {
-                "Claude Code uses it instead of cam's token or your /login".to_owned()
-            }
+            Self::Credential(_) => "Claude Code uses it instead of the login".to_owned(),
             Self::Cloud { provider, .. } => {
-                format!("Claude Code uses {provider} instead of cam's token or your /login")
+                format!("Claude Code uses {provider} instead of the login")
             }
-            Self::ApiKeyHelper => {
-                "Claude Code uses its key instead of cam's token or your /login".to_owned()
-            }
-            Self::Token => "it replaces the token cam passes".to_owned(),
+            Self::ApiKeyHelper => "Claude Code uses its key instead of the login".to_owned(),
         }
     }
 }
@@ -133,10 +126,13 @@ mod tests {
     #[test]
     fn names_and_effects() {
         assert_eq!(Conflict::ApiKeyHelper.name(), "apiKeyHelper");
-        assert_eq!(Conflict::Token.name(), "CLAUDE_CODE_OAUTH_TOKEN");
+        assert_eq!(
+            Conflict::Credential("CLAUDE_CODE_OAUTH_TOKEN").name(),
+            "CLAUDE_CODE_OAUTH_TOKEN"
+        );
         assert_eq!(
             Conflict::Credential("ANTHROPIC_API_KEY").effect(),
-            "Claude Code uses it instead of cam's token or your /login"
+            "Claude Code uses it instead of the login"
         );
     }
 }

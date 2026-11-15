@@ -1,10 +1,9 @@
 //! End-to-end tests for the `cam` binary.
 //!
-//! Every command runs with a cleared environment: only `CAM_CONFIG`,
-//! `CAM_TEST_STORE`, `HOME` and `PATH`, all inside a temp dir. So the real
-//! config, markers, Keychain and `claude` are never touched, and no real token
-//! can leak in. `cargo test` builds the binary with the `test-store` feature
-//! (see Cargo.toml).
+//! Every command runs with a cleared environment: only `CAM_CONFIG`, `HOME`,
+//! `PATH` and `FAKE_LOG`, all inside a temp dir. So the real config,
+//! markers, accounts and `claude` are never touched. The `claude` cam finds
+//! is [`FAKE_CLAUDE`], which keeps a fake login in the config dir it gets.
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -65,10 +64,14 @@ impl Sandbox {
         cmd.current_dir(cwd)
             .env_clear()
             .env("CAM_CONFIG", &self.config)
-            .env("CAM_TEST_STORE", self.store())
-            .env("HOME", self.root.join("home"))
-            .env("PATH", self.bin());
+            .env("HOME", self.home())
+            .env("PATH", self.bin())
+            .env("FAKE_LOG", self.root.join("claude.log"));
         cmd
+    }
+
+    fn home(&self) -> PathBuf {
+        self.root.join("home")
     }
 
     /// The sandbox's only `PATH` entry. Empty until a test adds a `claude`.
@@ -78,12 +81,7 @@ impl Sandbox {
 
     /// Writes [`FAKE_CLAUDE`] as `<rel>/claude` and returns its path.
     fn fake_claude(&self, rel: &str) -> PathBuf {
-        self.script(
-            rel,
-            &FAKE_CLAUDE
-                .replace("{TOKEN}", TOKEN)
-                .replace("{TOKEN_2}", TOKEN_2),
-        )
+        self.script(rel, FAKE_CLAUDE)
     }
 
     /// Writes an executable `<rel>/claude` with `body` and returns its path.
@@ -92,16 +90,6 @@ impl Sandbox {
         fs::write(&path, body).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
-    }
-
-    /// Stores `token` for `name` in the test store, as `cam add` would.
-    fn store_token(&self, name: &str, token: &str) {
-        fs::create_dir_all(self.store()).unwrap();
-        fs::write(self.store().join(name), token).unwrap();
-    }
-
-    fn store(&self) -> PathBuf {
-        self.root.join("store")
     }
 
     /// The default shim dir under the sandbox's `HOME`.
@@ -114,44 +102,111 @@ impl Sandbox {
         std::env::join_paths(dirs).unwrap()
     }
 
-    /// The token stored for `name` in the test store, if any.
-    fn stored(&self, name: &str) -> Option<String> {
-        fs::read_to_string(self.store().join(name)).ok()
+    /// Where cam keeps account `name`.
+    fn account_dir(&self, name: &str) -> PathBuf {
+        self.home().join(".local/share/cam/accounts").join(name)
     }
+
+    /// Creates account `name`'s dir, logged in as `email` the way
+    /// [`FAKE_CLAUDE`] records a login, and returns the dir.
+    fn logged_in(&self, name: &str, email: &str) -> PathBuf {
+        let dir = self.account_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        fake_login(&dir.join(".claude.json"), email);
+        dir
+    }
+
+    /// Logs Claude Code's own setup (`~/.claude.json`) in as `email`.
+    fn system_login(&self, email: &str) {
+        fake_login(&self.home().join(".claude.json"), email);
+    }
+
+    /// What [`FAKE_CLAUDE`] was asked to do, one line per `auth` call.
+    fn log(&self) -> String {
+        fs::read_to_string(self.root.join("claude.log")).unwrap_or_default()
+    }
+}
+
+/// Records a login as [`FAKE_CLAUDE`] does: the email in `.claude.json`,
+/// where `cam list` reads it, and in a file next to it for `auth status`.
+fn fake_login(json: &Path, email: &str) {
+    fs::write(
+        json,
+        format!("{{\"oauthAccount\": {{\"emailAddress\": \"{email}\"}}}}\n"),
+    )
+    .unwrap();
+    let mut flag = json.as_os_str().to_owned();
+    flag.push(".email");
+    fs::write(flag, format!("{email}\n")).unwrap();
 }
 
 const CAM: &str = env!("CARGO_BIN_EXE_cam");
 
-/// Fake values shaped like tokens. Not real credentials.
-const TOKEN: &str = "sk-ant-oat01-FAKE-cli-test-0001";
-const TOKEN_2: &str = "sk-ant-oat01-FAKE-cli-test-0002";
-
-/// A stand-in for `claude`. It prints its path, its argv and cam's variables.
-/// It names the token it got (`TOKEN`, `TOKEN_2` or `other`) instead of
-/// printing it, and exits with `$FAKE_EXIT`.
+/// A stand-in for `claude`. `auth login`, `auth status` and `auth logout`
+/// act on a fake login in `$CLAUDE_CONFIG_DIR`, or in `$HOME` for Claude
+/// Code's own setup, and log the call to `$FAKE_LOG`. Anything else prints
+/// its path, its argv and cam's variables, and exits with `$FAKE_EXIT`.
+/// Shell builtins only, since the sandbox `PATH` has nothing else.
+///
+/// - `FAKE_LOGIN=fail` makes the login fail; `nothing` makes it succeed
+///   without logging in.
+/// - `FAKE_EMAIL` is the email a login gets (default: `<account>@example.com`).
+/// - `FAKE_EXPIRES` is the `loginExpiresAt` that `auth status` reports.
+/// - `FAKE_LOGOUT=fail` makes the logout fail.
+/// - With `ANTHROPIC_API_KEY` set, `auth status` reports the key instead.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
+if [ "$1" = auth ] && [ -n "${FAKE_LOG-}" ]; then
+    echo "$* (${CLAUDE_CONFIG_DIR-system})" >> "$FAKE_LOG"
+fi
+if [ -n "${CLAUDE_CONFIG_DIR-}" ]; then
+    json="$CLAUDE_CONFIG_DIR/.claude.json"
+else
+    json="$HOME/.claude.json"
+fi
+case "$1 $2" in
+'auth login')
+    case "${FAKE_LOGIN-}" in
+        fail) echo 'Login cancelled.' >&2; exit 1 ;;
+        nothing) exit 0 ;;
+    esac
+    email="${FAKE_EMAIL:-${CAM_ACTIVE_ACCOUNT:-system}@example.com}"
+    printf '{"oauthAccount": {"emailAddress": "%s"}}\n' "$email" > "$json"
+    printf '%s\n' "$email" > "$json.email"
+    echo 'Login successful.'
+    exit 0 ;;
+'auth status')
+    if [ -n "${ANTHROPIC_API_KEY-}" ]; then
+        echo '{"loggedIn": true, "authMethod": "api_key", "apiKeySource": "ANTHROPIC_API_KEY"}'
+        exit 0
+    fi
+    if [ -s "$json.email" ]; then
+        read -r email < "$json.email"
+        printf '{"loggedIn": true, "authMethod": "claude.ai", "email": "%s", "orgName": "Acme", "subscriptionType": "team", "loginExpiresAt": "%s"}\n' \
+            "$email" "${FAKE_EXPIRES:-2099-01-01T00:00:00.000Z}"
+        exit 0
+    fi
+    echo '{"loggedIn": false, "authMethod": "none", "loginExpiresAt": null}'
+    exit 1 ;;
+'auth logout')
+    if [ "${FAKE_LOGOUT-}" = fail ]; then echo 'Logout failed.' >&2; exit 1; fi
+    : > "$json.email"
+    echo 'Successfully logged out from your Anthropic account.'
+    exit 0 ;;
+esac
 echo "claude: $0"
 printf 'argv:'
 for arg in "$@"; do printf ' [%s]' "$arg"; done
 echo
-if [ -z "${CLAUDE_CODE_OAUTH_TOKEN+set}" ]; then
-    echo 'token: unset'
-else
-    case "$CLAUDE_CODE_OAUTH_TOKEN" in
-        '{TOKEN}') echo 'token: TOKEN' ;;
-        '{TOKEN_2}') echo 'token: TOKEN_2' ;;
-        *) echo 'token: other' ;;
-    esac
-fi
+echo "config: ${CLAUDE_CONFIG_DIR-unset}"
 echo "account: ${CAM_ACTIVE_ACCOUNT-unset}"
 echo "depth: ${CAM_SHIM_DEPTH-unset}"
 exit "${FAKE_EXIT:-0}"
 "#;
 
-/// What [`FAKE_CLAUDE`] prints.
-fn launched(claude: &Path, argv: &str, token: &str, account: &str, depth: u32) -> String {
+/// What [`FAKE_CLAUDE`] prints when it's started as a session.
+fn launched(claude: &Path, argv: &str, config: &str, account: &str, depth: u32) -> String {
     format!(
-        "claude: {}\nargv:{argv}\ntoken: {token}\naccount: {account}\ndepth: {depth}\n",
+        "claude: {}\nargv:{argv}\nconfig: {config}\naccount: {account}\ndepth: {depth}\n",
         claude.display()
     )
 }
@@ -160,26 +215,48 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
 
+/// `text` with every "(in 12345 days)" written as "(in N days)", since the
+/// days left until a fixed expiry change with the date.
+fn any_days(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("(in ") {
+        out.push_str(&rest[..at + 4]);
+        rest = &rest[at + 4..];
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits > 0 && rest[digits..].starts_with(" days)") {
+            out.push('N');
+            rest = &rest[digits..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn stdout_of(assert: &assert_cmd::assert::Assert) -> String {
+    String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+}
+
 // --- which ---
 
 #[test]
-fn which_pass_through_when_nothing_is_set() {
+fn which_system_when_nothing_is_set() {
     let sb = Sandbox::new();
     sb.cam(&sb.dir("a"))
         .arg("which")
         .assert()
         .success()
-        .stdout("none (pass-through: no CAM_ACCOUNT, .claude-account or default)\n");
+        .stdout("system (no CAM_ACCOUNT or .claude-account)\n");
 }
 
 #[test]
-fn which_pass_through_without_config_file() {
+fn which_system_without_config_file() {
     let sb = Sandbox::with_config(None);
     sb.cam(&sb.dir("a"))
         .arg("which")
         .assert()
         .success()
-        .stdout("none (pass-through: no CAM_ACCOUNT, .claude-account or default)\n");
+        .stdout("system (no CAM_ACCOUNT or .claude-account)\n");
 }
 
 #[test]
@@ -195,15 +272,26 @@ fn which_reports_nearest_marker() {
 }
 
 #[test]
-fn which_reports_none_marker() {
+fn which_reports_system_marker() {
     let sb = Sandbox::new();
     sb.marker("work", "work\n");
-    let none = sb.marker("work/oss", "none # my own login\n");
+    let system = sb.marker("work/oss", "system # my own login\n");
     sb.cam(&sb.dir("work/oss/repo"))
         .arg("which")
         .assert()
         .success()
-        .stdout(format!("none (pass-through, from {})\n", none.display()));
+        .stdout(format!("system (from {})\n", system.display()));
+}
+
+#[test]
+fn which_treats_an_old_none_marker_as_an_unknown_account() {
+    let sb = Sandbox::new();
+    sb.marker("oss", "none\n");
+    sb.cam(&sb.dir("oss"))
+        .arg("which")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown account \"none\""));
 }
 
 #[test]
@@ -219,15 +307,15 @@ fn which_env_beats_marker() {
 }
 
 #[test]
-fn which_env_none_forces_pass_through_even_with_broken_config() {
+fn which_env_system_works_even_with_broken_config() {
     let sb = Sandbox::with_config(Some("not toml at all"));
     sb.marker("work", "work\n");
     sb.cam(&sb.dir("work"))
         .arg("which")
-        .env("CAM_ACCOUNT", "none")
+        .env("CAM_ACCOUNT", "system")
         .assert()
         .success()
-        .stdout("none (pass-through, from CAM_ACCOUNT)\n");
+        .stdout("system (from CAM_ACCOUNT)\n");
 }
 
 #[test]
@@ -243,21 +331,8 @@ fn which_empty_env_is_ignored() {
 }
 
 #[test]
-fn which_reports_default() {
-    let sb = Sandbox::with_config(Some(&format!("default = \"personal\"\n{CONFIG}")));
-    sb.cam(&sb.dir("a"))
-        .arg("which")
-        .assert()
-        .success()
-        .stdout(format!(
-            "personal (from default in {})\n",
-            sb.config.display()
-        ));
-}
-
-#[test]
 fn which_unknown_marker_name_fails_with_hint() {
-    let sb = Sandbox::with_config(Some(&format!("default = \"personal\"\n{CONFIG}")));
+    let sb = Sandbox::new();
     let ghost = sb.marker("a", "ghost\n");
     sb.cam(&sb.dir("a"))
         .arg("which")
@@ -315,7 +390,8 @@ fn which_empty_marker_fails() {
 
 #[test]
 fn which_broken_config_fails() {
-    let sb = Sandbox::with_config(Some("defualt = \"work\"\n"));
+    let sb = Sandbox::with_config(Some("acounts = 1\n"));
+    sb.marker("a", "work\n");
     sb.cam(&sb.dir("a"))
         .arg("which")
         .assert()
@@ -324,7 +400,23 @@ fn which_broken_config_fails() {
             "cam: cannot parse {}",
             sb.config.display()
         )))
-        .stderr(predicate::str::contains("unknown field `defualt`"));
+        .stderr(predicate::str::contains("unknown field `acounts`"));
+}
+
+#[test]
+fn which_explains_a_token_mode_config() {
+    let sb = Sandbox::with_config(Some(
+        "default = \"work\"\n[accounts.work]\ntoken_created = 2026-11-11\n",
+    ));
+    sb.marker("a", "work\n");
+    sb.cam(&sb.dir("a"))
+        .arg("which")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is from cam's token mode"))
+        .stderr(predicate::str::contains(
+            "security delete-generic-password -s cam",
+        ));
 }
 
 #[test]
@@ -417,18 +509,18 @@ fn use_replaces_existing_marker() {
 }
 
 #[test]
-fn use_none_writes_pass_through_marker_without_config() {
+fn use_system_writes_a_marker_without_config() {
     let sb = Sandbox::with_config(None);
     let dir = sb.dir("oss");
     sb.cam(&dir)
-        .args(["use", "none"])
+        .args(["use", "system"])
         .assert()
         .success()
         .stdout(format!(
-            "wrote {} (none)\n",
+            "wrote {} (system)\n",
             dir.join(".claude-account").display()
         ));
-    assert_eq!(read(&dir.join(".claude-account")), "none\n");
+    assert_eq!(read(&dir.join(".claude-account")), "system\n");
 }
 
 #[test]
@@ -583,200 +675,396 @@ fn usage_errors_are_redacted() {
 // --- add ---
 
 #[test]
-fn add_uses_the_test_store_not_the_keychain() {
+fn add_logs_in_and_records_the_account() {
     let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
     sb.cam(&sb.root)
         .args(["add", "work"])
-        .write_stdin(format!("{TOKEN}\n"))
         .assert()
         .success()
-        .stdout(format!(
-            "added work: token saved in the test store at {}\n",
-            sb.store().display()
-        ));
-    assert_eq!(sb.stored("work").as_deref(), Some(TOKEN));
-}
-
-#[test]
-fn add_records_the_account() {
-    let sb = Sandbox::with_config(None);
-    sb.cam(&sb.root)
-        .args(["add", "work"])
-        .write_stdin(TOKEN)
-        .assert()
-        .success();
-    let config = read(&sb.config);
-    assert!(
-        predicate::str::is_match(r"^\[accounts\.work\]\ntoken_created = \d{4}-\d{2}-\d{2}\n$")
-            .unwrap()
-            .eval(&config),
-        "{config}"
+        .stdout("Login successful.\nadded work: logged in as work@example.com (Acme, team)\n")
+        .stderr("");
+    assert_eq!(read(&sb.config), "[accounts.work]\n");
+    let dir = sb.account_dir("work");
+    let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    assert_eq!(
+        sb.log(),
+        format!(
+            "auth login ({dir})\nauth status --json ({dir})\n",
+            dir = dir.display()
+        )
     );
-
-    // The new account resolves.
-    let marker = sb.marker("w", "work\n");
-    sb.cam(&sb.dir("w"))
-        .arg("which")
-        .assert()
-        .success()
-        .stdout(format!("work (from {})\n", marker.display()));
 }
 
 #[test]
 fn add_keeps_existing_config_comments() {
     let sb = Sandbox::with_config(Some("# my accounts\n[accounts.personal] # home\n"));
-    sb.cam(&sb.root)
-        .args(["add", "work"])
-        .write_stdin(TOKEN)
-        .assert()
-        .success();
-    let config = read(&sb.config);
-    assert!(
-        config.starts_with("# my accounts\n[accounts.personal] # home\n"),
-        "{config}"
+    sb.fake_claude("bin");
+    sb.cam(&sb.root).args(["add", "work"]).assert().success();
+    assert_eq!(
+        read(&sb.config),
+        "# my accounts\n[accounts.personal] # home\n\n[accounts.work]\n"
     );
-    assert!(config.contains("[accounts.work]"), "{config}");
 }
 
 #[test]
-fn add_twice_needs_force() {
-    let sb = Sandbox::with_config(None);
+fn add_refuses_an_account_that_already_has_a_dir() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
     sb.cam(&sb.root)
         .args(["add", "work"])
-        .write_stdin(TOKEN)
         .assert()
-        .success();
-    sb.cam(&sb.root)
-        .args(["add", "work"])
-        .write_stdin(TOKEN_2)
-        .assert()
-        .failure()
         .code(1)
         .stderr(format!(
-            "cam: a token for \"work\" is already stored in the test store at {}\nhint: pass --force to replace it\n",
-            sb.store().display()
+            "cam: {} already exists\nhint: to log in again, run `cam login work`; to start over, `cam remove work` first\n",
+            sb.account_dir("work").display()
         ));
-    assert_eq!(sb.stored("work").as_deref(), Some(TOKEN));
-
-    sb.cam(&sb.root)
-        .args(["add", "work", "--force"])
-        .write_stdin(TOKEN_2)
-        .assert()
-        .success()
-        .stdout(predicate::str::starts_with("replaced work: token saved"));
-    assert_eq!(sb.stored("work").as_deref(), Some(TOKEN_2));
+    assert_eq!(sb.log(), "");
 }
 
 #[test]
-fn add_rejects_bad_tokens_without_echoing_them() {
+fn add_sets_up_a_configured_account_that_has_no_dir() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .assert()
+        .success()
+        .stdout(predicate::str::ends_with(
+            "added work: logged in as work@example.com (Acme, team)\n",
+        ));
+    assert_eq!(read(&sb.config), CONFIG);
+}
+
+#[test]
+fn add_cleans_up_after_a_failed_login() {
     let sb = Sandbox::with_config(None);
-    for (input, message) in [
-        ("", "no token entered"),
-        ("hello there", "doesn't look like a token"),
-        (
-            "sk-ant-oat01-FAKE-secret-part with-space",
-            "doesn't look like a token",
-        ),
-        (
-            "sk-ant-api03-FAKE-secret-part",
-            "looks like an Anthropic API key",
-        ),
-    ] {
-        sb.cam(&sb.root)
-            .args(["add", "work"])
-            .write_stdin(input)
-            .assert()
-            .failure()
-            .code(1)
-            .stderr(predicate::str::contains(message))
-            .stderr(predicate::str::contains("secret-part").not())
-            .stderr(predicate::str::contains("hello").not());
-    }
-    assert_eq!(sb.stored("work"), None);
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .env("FAKE_LOGIN", "fail")
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(
+            "Login cancelled.\ncam: work was not added: the login didn't finish (exit status 1)\n",
+        );
+    assert!(!sb.account_dir("work").exists());
+    assert!(!sb.config.exists());
+    assert!(sb.log().ends_with(&format!(
+        "auth logout ({})\n",
+        sb.account_dir("work").display()
+    )));
+}
+
+#[test]
+fn add_cleans_up_when_claude_reports_no_login() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .env("FAKE_LOGIN", "nothing")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "work was not added: Claude Code reports no login",
+        ));
+    assert!(!sb.account_dir("work").exists());
     assert!(!sb.config.exists());
 }
 
 #[test]
-fn add_rejects_bad_names() {
+fn add_rejects_bad_names_before_doing_anything() {
     let sb = Sandbox::with_config(None);
-    for (args, message) in [
-        (vec!["add", "Work"], "invalid account name \"Work\""),
-        (vec!["add", "none"], "\"none\" is reserved"),
-    ] {
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["add", "system"])
+        .assert()
+        .code(1)
+        .stderr("cam: \"system\" is reserved: it's Claude Code's own setup, not an account\n");
+    for bad in ["Work", "_x", "a b", ""] {
         sb.cam(&sb.root)
-            .args(&args)
-            .write_stdin(TOKEN)
+            .args(["add", bad])
             .assert()
-            .failure()
             .code(1)
-            .stderr(predicate::str::contains(message));
+            .stderr(predicate::str::contains("invalid account name"));
     }
-    assert_eq!(sb.stored("work"), None);
+    assert!(!sb.home().join(".local").exists());
+    assert_eq!(sb.log(), "");
 }
 
 #[test]
-fn add_with_broken_config_stores_nothing() {
+fn add_with_a_broken_config_creates_nothing() {
     let sb = Sandbox::with_config(Some("not toml"));
+    sb.fake_claude("bin");
     sb.cam(&sb.root)
         .args(["add", "work"])
-        .write_stdin(TOKEN)
         .assert()
-        .failure()
+        .code(1)
         .stderr(predicate::str::contains("cannot parse"));
-    assert_eq!(sb.stored("work"), None);
-    assert_eq!(read(&sb.config), "not toml");
+    assert!(!sb.account_dir("work").exists());
+    assert_eq!(sb.log(), "");
+}
+
+#[test]
+fn add_without_claude_creates_nothing() {
+    let sb = Sandbox::with_config(None);
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .assert()
+        .code(127)
+        .stderr(predicate::str::starts_with(
+            "cam: cannot find the real `claude` on PATH",
+        ));
+    assert!(!sb.account_dir("work").exists());
+}
+
+#[test]
+fn add_warns_when_the_email_is_already_used() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.system_login("me@home.org");
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .env("FAKE_EMAIL", "Me@Home.org")
+        .assert()
+        .success()
+        .stderr(
+            "warning: work is logged in as Me@Home.org, the same as system; the browser may have been signed in to the wrong claude.ai account\n\
+             hint: sign it in to the right one, then run `cam login work`\n",
+        );
+}
+
+#[test]
+fn add_checks_the_login_itself_despite_an_api_key() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["add", "work"])
+        .env("ANTHROPIC_API_KEY", "sk-ant-api03-FAKE")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added work: logged in as work@example.com"))
+        .stderr(
+            "warning: ANTHROPIC_API_KEY is set and outranks the login of \"work\"; unset it to use that account\n",
+        );
+}
+
+// --- login ---
+
+#[test]
+fn login_logs_the_named_account_in_again() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "old@company.com");
+    sb.cam(&sb.root)
+        .args(["login", "work"])
+        .env("FAKE_EMAIL", "new@company.com")
+        .assert()
+        .success()
+        .stdout("Login successful.\nwork: logged in as new@company.com (Acme, team)\n")
+        .stderr("");
+    assert!(read(&dir.join(".claude.json")).contains("new@company.com"));
+}
+
+#[test]
+fn login_defaults_to_the_account_here() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
+    let marker = sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work/repo"))
+        .arg("login")
+        .assert()
+        .success()
+        .stdout(format!(
+            "work (from {})\nLogin successful.\nwork: logged in as work@example.com (Acme, team)\n",
+            marker.display()
+        ));
+}
+
+#[test]
+fn login_system_is_claude_codes_own_login() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["login", "system"])
+        // Inside a session for `work`: its config dir must not leak in.
+        .env("CAM_ACTIVE_ACCOUNT", "work")
+        .env("CLAUDE_CONFIG_DIR", sb.account_dir("work"))
+        .assert()
+        .success()
+        .stdout("Login successful.\nsystem: logged in as system@example.com (Acme, team)\n");
+    assert_eq!(
+        sb.log(),
+        "auth login (system)\nauth status --json (system)\n"
+    );
+    assert!(read(&sb.home().join(".claude.json")).contains("system@example.com"));
+}
+
+#[test]
+fn a_failed_login_deletes_nothing() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root)
+        .args(["login", "work"])
+        .env("FAKE_LOGIN", "fail")
+        .assert()
+        .code(1)
+        .stderr("Login cancelled.\ncam: the login didn't finish (exit status 1)\n");
+    assert!(read(&dir.join(".claude.json")).contains("you@company.com"));
+    assert!(!sb.log().contains("logout"));
+}
+
+#[test]
+fn login_needs_a_configured_account_with_a_dir() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["login", "ghost"])
+        .assert()
+        .code(1)
+        .stderr("cam: unknown account \"ghost\"\nhint: add it with `cam add ghost`\n");
+    sb.cam(&sb.root)
+        .args(["login", "work"])
+        .assert()
+        .code(1)
+        .stderr(format!(
+            "cam: account \"work\" has no dir at {}\nhint: set it up again with `cam add work`\n",
+            sb.account_dir("work").display()
+        ));
+    assert_eq!(sb.log(), "");
 }
 
 // --- remove ---
 
 #[test]
-fn remove_deletes_token_and_config_entry() {
-    let sb = Sandbox::with_config(None);
-    sb.cam(&sb.root)
-        .args(["add", "work"])
-        .write_stdin(TOKEN)
-        .assert()
-        .success();
+fn remove_logs_out_then_deletes_the_dir_and_entry() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
     sb.cam(&sb.root)
         .args(["remove", "work"])
         .assert()
         .success()
         .stdout(format!(
-            "removed work: config entry and token in the test store at {}\n",
-            sb.store().display()
-        ))
-        .stderr("");
-    assert_eq!(sb.stored("work"), None);
-    assert!(!read(&sb.config).contains("work"));
+            "removed work: logged out, deleted {} and its config entry\n",
+            dir.display()
+        ));
+    assert!(!dir.exists());
+    assert_eq!(read(&sb.config), "[accounts.personal]\n");
+    assert_eq!(sb.log(), format!("auth logout ({})\n", dir.display()));
 }
 
 #[test]
-fn remove_default_account_clears_default() {
-    let sb = Sandbox::with_config(Some(&format!("default = \"work\"\n{CONFIG}")));
+fn remove_keeps_everything_if_the_logout_fails() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
     sb.cam(&sb.root)
         .args(["remove", "work"])
+        .env("FAKE_LOGOUT", "fail")
         .assert()
-        .success()
-        .stdout("removed work: config entry (no token was stored)\n")
-        .stderr("note: work was the default, so `default` is now unset\n");
-    let config = read(&sb.config);
-    assert!(!config.contains("default"), "{config}");
-    assert!(config.contains("[accounts.personal]"), "{config}");
-}
-
-#[test]
-fn remove_unknown_account_fails() {
-    let sb = Sandbox::new();
-    sb.cam(&sb.root)
-        .args(["remove", "ghost"])
-        .assert()
-        .failure()
         .code(1)
-        .stderr("cam: nothing to remove: \"ghost\" has no config entry and no stored token\n");
+        .stderr(
+            "cam: cannot log work out, so nothing was removed: `claude auth logout` failed (exit status 1)\n",
+        );
+    assert!(dir.join(".claude.json").exists());
     assert_eq!(read(&sb.config), CONFIG);
 }
 
+#[test]
+fn remove_without_claude_keeps_the_dir() {
+    let sb = Sandbox::new();
+    let dir = sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root)
+        .args(["remove", "work"])
+        .assert()
+        .code(127)
+        .stderr(predicate::str::starts_with("cam: cannot log work out"));
+    assert!(dir.exists());
+}
+
+#[test]
+fn remove_handles_partial_state() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    // A config entry without a dir.
+    sb.cam(&sb.root)
+        .args(["remove", "personal"])
+        .assert()
+        .success()
+        .stdout("removed personal: its config entry (it had no account dir)\n");
+    // A dir without a config entry.
+    let dir = sb.logged_in("stray", "x@y.org");
+    sb.cam(&sb.root)
+        .args(["remove", "stray"])
+        .assert()
+        .success()
+        .stdout(format!(
+            "removed stray: logged out and deleted {} (it had no config entry)\n",
+            dir.display()
+        ));
+    assert!(!dir.exists());
+    // Neither.
+    sb.cam(&sb.root)
+        .args(["remove", "stray"])
+        .assert()
+        .code(1)
+        .stderr("cam: nothing to remove: \"stray\" has no config entry and no account dir\n");
+}
+
+#[test]
+fn remove_never_follows_links_out_of_the_dir() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    let shared = sb.dir("home/.claude/skills");
+    fs::write(shared.join("keep.md"), "mine\n").unwrap();
+    symlink(&shared, dir.join("skills")).unwrap();
+    sb.cam(&sb.root).args(["remove", "work"]).assert().success();
+    assert!(!dir.exists());
+    assert_eq!(read(&shared.join("keep.md")), "mine\n");
+}
+
+#[test]
+fn remove_rejects_system_and_bad_names() {
+    let sb = Sandbox::new();
+    sb.cam(&sb.root)
+        .args(["remove", "system"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("\"system\" is reserved"));
+    sb.cam(&sb.root)
+        .args(["remove", "Work"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("invalid account name"));
+}
+
 // --- list ---
+
+#[test]
+fn list_shows_system_and_each_account_without_running_claude() {
+    // No `claude` on PATH: `list` reads files only.
+    let sb = Sandbox::new();
+    sb.system_login("me@home.org");
+    sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root)
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(
+            "ACCOUNT   EMAIL\n\
+             system    me@home.org\n\
+             personal  -\n\
+             work      you@company.com\n",
+        )
+        .stderr("");
+}
 
 #[test]
 fn list_without_accounts() {
@@ -785,64 +1073,26 @@ fn list_without_accounts() {
         .arg("list")
         .assert()
         .success()
-        .stdout("no accounts yet; add one with `cam add <name>`\n");
+        .stdout("ACCOUNT  EMAIL\nsystem   -\n\nno accounts yet; add one with `cam add <name>`\n");
 }
 
 #[test]
-fn list_shows_accounts_and_default() {
-    let sb = Sandbox::with_config(Some(&format!("default = \"personal\"\n{CONFIG}")));
-    sb.cam(&sb.root)
-        .args(["add", "oss"])
-        .write_stdin(TOKEN)
-        .assert()
-        .success();
-    let output = sb.cam(&sb.root).arg("list").assert().success();
-    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 4, "{stdout}");
-    assert!(lines[0].starts_with("ACCOUNT"), "{stdout}");
-    assert!(
-        predicate::str::is_match(r"^oss +\d{4}-\d{2}-\d{2} \(today\)$")
-            .unwrap()
-            .eval(lines[1]),
-        "{stdout}"
-    );
-    assert!(
-        predicate::str::is_match(r"^personal \(default\) +unknown$")
-            .unwrap()
-            .eval(lines[2]),
-        "{stdout}"
-    );
-    assert!(
-        predicate::str::is_match(r"^work +unknown$")
-            .unwrap()
-            .eval(lines[3]),
-        "{stdout}"
-    );
-}
-
-#[test]
-fn list_never_prints_tokens() {
-    let sb = Sandbox::with_config(None);
-    sb.cam(&sb.root)
-        .args(["add", "work"])
-        .write_stdin(TOKEN)
-        .assert()
-        .success();
+fn list_with_a_broken_config_fails() {
+    let sb = Sandbox::with_config(Some("not toml"));
     sb.cam(&sb.root)
         .arg("list")
         .assert()
-        .success()
-        .stdout(predicate::str::contains("FAKE").not());
+        .code(1)
+        .stderr(predicate::str::contains("cannot parse"));
 }
 
 // --- exec ---
 
 #[test]
-fn exec_with_account_injects_token() {
+fn exec_with_an_account_sets_its_config_dir() {
     let sb = Sandbox::new();
     let claude = sb.fake_claude("bin");
-    sb.store_token("work", TOKEN);
+    let work = sb.logged_in("work", "you@company.com");
     sb.marker("work", "work\n");
     sb.cam(&sb.dir("work/repo"))
         .args(["exec", "-p", "hello world", "--model", "x"])
@@ -851,7 +1101,7 @@ fn exec_with_account_injects_token() {
         .stdout(launched(
             &claude,
             " [-p] [hello world] [--model] [x]",
-            "TOKEN",
+            &work.display().to_string(),
             "work",
             1,
         ))
@@ -862,39 +1112,51 @@ fn exec_with_account_injects_token() {
 fn exec_follows_cam_account() {
     let sb = Sandbox::new();
     let claude = sb.fake_claude("bin");
-    sb.store_token("work", TOKEN);
-    sb.store_token("personal", TOKEN_2);
+    sb.logged_in("work", "you@company.com");
+    let personal = sb.logged_in("personal", "me@home.org");
     sb.marker("work", "work\n");
     sb.cam(&sb.dir("work"))
         .arg("exec")
         .env("CAM_ACCOUNT", "personal")
         .assert()
         .success()
-        .stdout(launched(&claude, "", "TOKEN_2", "personal", 1));
+        .stdout(launched(
+            &claude,
+            "",
+            &personal.display().to_string(),
+            "personal",
+            1,
+        ));
 }
 
 #[test]
-fn exec_pass_through_leaves_the_environment_alone() {
+fn exec_system_leaves_the_environment_alone() {
     let sb = Sandbox::new();
     let claude = sb.fake_claude("bin");
-    // A token the user exported themselves is theirs to keep.
+    // A CLAUDE_CONFIG_DIR the user exported themselves is theirs to keep.
     sb.cam(&sb.dir("a"))
         .args(["exec", "--", "--help"])
-        .env("CLAUDE_CODE_OAUTH_TOKEN", TOKEN_2)
+        .env("CLAUDE_CONFIG_DIR", "/somewhere/else")
         .assert()
         .success()
-        .stdout(launched(&claude, " [--help]", "TOKEN_2", "unset", 1));
+        .stdout(launched(
+            &claude,
+            " [--help]",
+            "/somewhere/else",
+            "unset",
+            1,
+        ));
 }
 
 #[test]
-fn exec_pass_through_drops_a_token_from_a_parent_cam() {
+fn exec_system_drops_the_config_dir_of_a_parent_cam() {
     let sb = Sandbox::new();
     let claude = sb.fake_claude("bin");
-    sb.marker("oss", "none\n");
+    sb.marker("oss", "system\n");
     // As if run from inside a session that cam started for `work`.
     sb.cam(&sb.dir("oss"))
         .arg("exec")
-        .env("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+        .env("CLAUDE_CONFIG_DIR", sb.account_dir("work"))
         .env("CAM_ACTIVE_ACCOUNT", "work")
         .env("CAM_SHIM_DEPTH", "1")
         .assert()
@@ -906,16 +1168,22 @@ fn exec_pass_through_drops_a_token_from_a_parent_cam() {
 fn exec_nested_session_switches_account() {
     let sb = Sandbox::new();
     let claude = sb.fake_claude("bin");
-    sb.store_token("personal", TOKEN_2);
-    sb.marker("home", "personal\n");
-    sb.cam(&sb.dir("home"))
+    let personal = sb.logged_in("personal", "me@home.org");
+    sb.marker("home-stuff", "personal\n");
+    sb.cam(&sb.dir("home-stuff"))
         .arg("exec")
-        .env("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
+        .env("CLAUDE_CONFIG_DIR", sb.account_dir("work"))
         .env("CAM_ACTIVE_ACCOUNT", "work")
         .env("CAM_SHIM_DEPTH", "1")
         .assert()
         .success()
-        .stdout(launched(&claude, "", "TOKEN_2", "personal", 2));
+        .stdout(launched(
+            &claude,
+            "",
+            &personal.display().to_string(),
+            "personal",
+            2,
+        ));
 }
 
 #[test]
@@ -930,7 +1198,7 @@ fn exec_passes_the_exit_code_through() {
 }
 
 #[test]
-fn exec_without_a_token_fails_before_running_claude() {
+fn exec_without_an_account_dir_fails_before_running_claude() {
     let sb = Sandbox::new();
     sb.fake_claude("bin");
     sb.marker("work", "work\n");
@@ -940,25 +1208,31 @@ fn exec_without_a_token_fails_before_running_claude() {
         .code(1)
         .stdout("")
         .stderr(format!(
-            "cam: no token stored for \"work\" in the test store at {}\nhint: add one with `cam add work`\n",
-            sb.store().display()
+            "cam: account \"work\" has no dir at {}\nhint: set it up again with `cam add work`\n",
+            sb.account_dir("work").display()
         ));
 }
 
 #[test]
-fn exec_with_an_invalid_stored_token_fails() {
+fn exec_does_not_check_the_login() {
+    // An expired or missing login is Claude Code's to ask about.
     let sb = Sandbox::new();
-    sb.fake_claude("bin");
-    sb.store_token("work", "junk value");
-    sb.marker("work", "work\n");
-    sb.cam(&sb.dir("work"))
+    let claude = sb.fake_claude("bin");
+    let work = sb.account_dir("work");
+    fs::create_dir_all(&work).unwrap();
+    sb.cam(&sb.root)
         .arg("exec")
+        .env("CAM_ACCOUNT", "work")
         .assert()
-        .code(1)
-        .stdout("")
-        .stderr(predicate::str::contains("the token stored for \"work\""))
-        .stderr(predicate::str::contains("cam add work --force"))
-        .stderr(predicate::str::contains("junk").not());
+        .success()
+        .stdout(launched(
+            &claude,
+            "",
+            &work.display().to_string(),
+            "work",
+            1,
+        ));
+    assert_eq!(sb.log(), "");
 }
 
 #[test]
@@ -975,25 +1249,27 @@ fn exec_unknown_account_fails_before_running_claude() {
 }
 
 #[test]
-fn exec_warns_about_variables_that_outrank_the_token() {
+fn exec_warns_about_variables_that_outrank_the_login() {
     let sb = Sandbox::new();
     let claude = sb.fake_claude("bin");
-    sb.store_token("work", TOKEN);
+    let work = sb.logged_in("work", "you@company.com");
     sb.cam(&sb.root)
         .arg("exec")
         .env("CAM_ACCOUNT", "work")
         .env("ANTHROPIC_API_KEY", "sk-ant-api03-FAKE")
         .env("ANTHROPIC_AUTH_TOKEN", "")
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-FAKE")
         .assert()
         .success()
-        .stdout(launched(&claude, "", "TOKEN", "work", 1))
+        .stdout(launched(&claude, "", &work.display().to_string(), "work", 1))
         .stderr(
-            "warning: ANTHROPIC_API_KEY is set and outranks the token for \"work\"; unset it to use that account\n",
+            "warning: ANTHROPIC_API_KEY is set and outranks the login of \"work\"; unset it to use that account\n\
+             warning: CLAUDE_CODE_OAUTH_TOKEN is set and outranks the login of \"work\"; unset it to use that account\n",
         );
 }
 
 #[test]
-fn exec_pass_through_does_not_warn() {
+fn exec_system_does_not_warn() {
     let sb = Sandbox::new();
     sb.fake_claude("bin");
     sb.cam(&sb.root)
@@ -1165,7 +1441,7 @@ fn shim_runs_claude_with_the_account() {
         .args(["shim", "install"])
         .assert()
         .success();
-    sb.store_token("work", TOKEN);
+    let work = sb.logged_in("work", "you@company.com");
     sb.marker("work", "work\n");
     // Every argument reaches claude, even ones cam would otherwise parse.
     sb.command(&sb.shims().join("claude"), &sb.dir("work/repo"))
@@ -1176,7 +1452,7 @@ fn shim_runs_claude_with_the_account() {
         .stdout(launched(
             &claude,
             " [--help] [exec] [-p] [hi there]",
-            "TOKEN",
+            &work.display().to_string(),
             "work",
             1,
         ))
@@ -1184,7 +1460,7 @@ fn shim_runs_claude_with_the_account() {
 }
 
 #[test]
-fn shim_pass_through_and_exit_code() {
+fn shim_system_and_exit_code() {
     let sb = Sandbox::new();
     let claude = sb.fake_claude("bin");
     sb.cam(&sb.root)
@@ -1379,114 +1655,117 @@ fn shim_uninstall_removes_only_a_shim() {
 
 // --- whoami ---
 
-/// Adds `name` with [`TOKEN`] through `cam add`, so it gets today's date.
-fn add(sb: &Sandbox, name: &str) {
-    sb.cam(&sb.root)
-        .args(["add", name])
-        .write_stdin(TOKEN)
-        .assert()
-        .success();
-}
+// --- whoami ---
 
 #[test]
-fn whoami_shows_the_account_and_token() {
+fn whoami_shows_who_the_account_is_logged_in_as() {
     let sb = Sandbox::new();
-    add(&sb, "work");
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
     let marker = sb.marker("work", "work\n");
-    sb.cam(&sb.dir("work/repo"))
+    let assert = sb
+        .cam(&sb.dir("work/repo"))
         .arg("whoami")
         .assert()
         .success()
-        .stdout(predicate::str::starts_with(format!(
-            "work (from {})\n  token:   stored in the test store at {}, added ",
-            marker.display(),
-            sb.store().display()
-        )))
-        .stdout(predicate::str::contains("(today), good until about "))
-        .stdout(predicate::str::contains(TOKEN).not())
         .stderr("");
-}
-
-#[test]
-fn whoami_fails_without_a_token() {
-    let sb = Sandbox::new();
-    let marker = sb.marker("work", "work\n");
-    sb.cam(&sb.dir("work"))
-        .arg("whoami")
-        .assert()
-        .code(1)
-        .stdout(format!("work (from {})\n", marker.display()))
-        .stderr(format!(
-            "cam: no token stored for \"work\" in the test store at {}\nhint: add one with `cam add work`\n",
-            sb.store().display()
-        ));
-}
-
-#[test]
-fn whoami_pass_through() {
-    let sb = Sandbox::new();
-    sb.cam(&sb.root)
-        .arg("whoami")
-        .assert()
-        .success()
-        .stdout(
-            "none (pass-through: no CAM_ACCOUNT, .claude-account or default)\n  \
-             login:   Claude Code's own (`claude auth status` shows which)\n",
+    assert_eq!(
+        any_days(&stdout_of(&assert)),
+        format!(
+            "work (from {})\n  email:   you@company.com\n  org:     Acme (team)\n  login:   expires 2099-01-01 (in N days)\n",
+            marker.display()
         )
-        .stderr("");
+    );
 }
 
 #[test]
-fn whoami_names_an_exported_token_in_pass_through() {
+fn whoami_system() {
     let sb = Sandbox::new();
-    sb.cam(&sb.root)
-        .arg("whoami")
-        .env("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "  login:   the CLAUDE_CODE_OAUTH_TOKEN exported in this shell\n",
-        ))
-        .stdout(predicate::str::contains(TOKEN).not());
+    sb.fake_claude("bin");
+    sb.system_login("me@home.org");
+    let assert = sb.cam(&sb.dir("a")).arg("whoami").assert().success();
+    assert_eq!(
+        any_days(&stdout_of(&assert)),
+        "system (no CAM_ACCOUNT or .claude-account)\n  email:   me@home.org\n  org:     Acme (team)\n  login:   expires 2099-01-01 (in N days)\n"
+    );
 }
 
 #[test]
-fn whoami_reports_the_session_and_conflicts() {
+fn whoami_fails_when_not_logged_in() {
     let sb = Sandbox::new();
-    sb.cam(&sb.root)
-        .arg("whoami")
-        .env("CAM_ACCOUNT", "none")
-        .env("CAM_ACTIVE_ACCOUNT", "work")
-        .env("CLAUDE_CODE_OAUTH_TOKEN", TOKEN)
-        .env("ANTHROPIC_API_KEY", TOKEN_2)
-        .assert()
-        .success()
-        .stdout(
-            "none (pass-through, from CAM_ACCOUNT)\n  \
-             login:   Claude Code's own (`claude auth status` shows which)\n  \
-             session: this shell is inside a `claude` that cam started as work\n",
-        )
-        .stderr(
-            "warning: ANTHROPIC_API_KEY is set, so Claude Code uses it instead of cam's token or your /login\n",
-        );
-}
-
-#[test]
-fn whoami_warns_about_an_expired_token() {
-    let sb = Sandbox::with_config(Some("[accounts.work]\ntoken_created = 2021-03-01\n"));
-    sb.store_token("work", TOKEN);
+    sb.fake_claude("bin");
+    fs::create_dir_all(sb.account_dir("work")).unwrap();
     sb.cam(&sb.root)
         .arg("whoami")
         .env("CAM_ACCOUNT", "work")
         .assert()
+        .code(1)
+        .stdout("work (from CAM_ACCOUNT)\n  login:   not logged in\n")
+        .stderr("cam: \"work\" isn't logged in\nhint: run `cam login work`\n");
+}
+
+#[test]
+fn whoami_fails_when_the_login_has_expired() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root)
+        .arg("whoami")
+        .env("CAM_ACCOUNT", "work")
+        .env("FAKE_EXPIRES", "2020-01-01T00:00:00.000Z")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("  login:   expired 2020-01-01 ("))
+        .stderr(predicate::str::contains("hint: run `cam login work`"));
+}
+
+#[test]
+fn whoami_shows_what_outranks_the_login() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root)
+        .arg("whoami")
+        .env("CAM_ACCOUNT", "work")
+        .env("ANTHROPIC_API_KEY", "sk-ant-api03-FAKE-SECRET")
+        .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "probably expired around 2022-03-01\n",
-        ))
+        .stdout(
+            "work (from CAM_ACCOUNT)\n  login:   ANTHROPIC_API_KEY, which Claude Code uses instead of a login\n",
+        )
         .stderr(
-            "warning: the token for \"work\" has probably expired (around 2022-03-01)\n\
-             hint: run `claude setup-token` and sign in with the account for work, then `cam add work --force`\n",
+            "warning: ANTHROPIC_API_KEY is set, so Claude Code uses it instead of the login\n",
         );
+}
+
+#[test]
+fn whoami_reports_the_session() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.logged_in("personal", "me@home.org");
+    sb.cam(&sb.root)
+        .arg("whoami")
+        .env("CAM_ACCOUNT", "personal")
+        .env("CAM_ACTIVE_ACCOUNT", "work")
+        .env("CLAUDE_CONFIG_DIR", sb.account_dir("work"))
+        .assert()
+        .success()
+        .stdout(predicate::str::ends_with(
+            "  session: this shell is inside a `claude` that cam started as work\n",
+        ));
+}
+
+#[test]
+fn whoami_without_an_account_dir_fails() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .arg("whoami")
+        .env("CAM_ACCOUNT", "work")
+        .assert()
+        .code(1)
+        .stdout("work (from CAM_ACCOUNT)\n")
+        .stderr(predicate::str::contains("has no dir at"));
 }
 
 // --- doctor ---
@@ -1494,114 +1773,165 @@ fn whoami_warns_about_an_expired_token() {
 #[test]
 fn doctor_all_good() {
     let sb = Sandbox::new();
-    sb.fake_claude("bin");
+    let claude = sb.fake_claude("bin");
     sb.cam(&sb.root)
         .args(["shim", "install"])
         .assert()
         .success();
-    add(&sb, "work");
-    add(&sb, "personal");
+    sb.system_login("me@home.org");
+    sb.logged_in("work", "you@company.com");
+    sb.logged_in("personal", "personal@home.org");
     let marker = sb.marker("work", "work\n");
-    let output = sb
-        .cam(&sb.dir("work/repo"))
+    let assert = sb
+        .cam(&sb.dir("work"))
         .arg("doctor")
         .env("PATH", sb.path(&[&sb.shims(), &sb.bin()]))
         .assert()
         .success()
-        .stderr("")
-        .get_output()
-        .stdout
-        .clone();
-    let stdout = String::from_utf8(output).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
+        .stderr("");
     assert_eq!(
-        lines[0],
-        format!("ok    claude: {}/claude", sb.bin().display())
-    );
-    assert_eq!(
-        lines[1],
+        any_days(&stdout_of(&assert)),
         format!(
-            "ok    shim: plain `claude` runs through cam ({}/claude)",
-            sb.shims().display()
+            "ok    claude: {claude}\n\
+             ok    shim: plain `claude` runs through cam ({shim})\n\
+             ok    config: {config}, 2 accounts\n\
+             ok    system: logged in as me@home.org (Acme, team), login expires 2099-01-01 (in N days)\n\
+             ok    account personal: logged in as personal@home.org (Acme, team), login expires 2099-01-01 (in N days)\n\
+             ok    account work: logged in as you@company.com (Acme, team), login expires 2099-01-01 (in N days)\n\
+             ok    here: work (from {marker})\n\
+             ok    environment: nothing outranks the login\n\
+             ok    settings: nothing outranks the login (no settings files found)\n\
+             \n\
+             no problems found\n",
+            claude = claude.display(),
+            shim = sb.shims().join("claude").display(),
+            config = sb.config.display(),
+            marker = marker.display(),
         )
     );
-    assert_eq!(
-        lines[2],
-        format!(
-            "ok    config: {}, 2 accounts, no default",
-            sb.config.display()
-        )
-    );
-    assert!(
-        lines[3].starts_with("ok    account personal: token stored, added "),
-        "{stdout}"
-    );
-    assert!(
-        lines[4].starts_with("ok    account work: token stored, added "),
-        "{stdout}"
-    );
-    assert_eq!(
-        lines[5..],
-        [
-            format!("ok    here: work (from {})", marker.display()).as_str(),
-            "ok    environment: nothing outranks cam's tokens",
-            "ok    settings: nothing outranks cam's tokens (no settings files found)",
-            "",
-            "no problems found",
-        ]
-    );
-    assert!(!stdout.contains(TOKEN));
 }
 
 #[test]
 fn doctor_reports_problems_and_fails() {
     let sb = Sandbox::new();
-    // User settings with a helper, and a repo whose local settings switch
-    // to Bedrock. The values must never be printed.
-    fs::create_dir_all(sb.root.join("home/.claude")).unwrap();
+    sb.fake_claude("bin");
+    // `work` has no dir, and `personal` isn't logged in.
+    fs::create_dir_all(sb.account_dir("personal")).unwrap();
+    let settings = sb.dir("home/.claude").join("settings.json");
     fs::write(
-        sb.root.join("home/.claude/settings.json"),
-        format!(
-            r#"{{"apiKeyHelper": "echo {TOKEN}", "env": {{"ANTHROPIC_AUTH_TOKEN": "{TOKEN_2}"}}}}"#
-        ),
-    )
-    .unwrap();
-    sb.dir("repo/.git");
-    fs::create_dir_all(sb.root.join("repo/.claude")).unwrap();
-    fs::write(
-        sb.root.join("repo/.claude/settings.local.json"),
-        r#"{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}"#,
+        &settings,
+        r#"{"apiKeyHelper": "~/bin/SECRET-helper.sh", "env": {"ANTHROPIC_AUTH_TOKEN": "SECRET-VALUE"}}"#,
     )
     .unwrap();
     let assert = sb
-        .cam(&sb.dir("repo/src"))
+        .cam(&sb.root)
         .arg("doctor")
-        .env("ANTHROPIC_API_KEY", TOKEN)
+        .env("ANTHROPIC_API_KEY", "sk-ant-api03-SECRET")
         .assert()
         .code(1)
-        .stderr("cam: 3 problems, 4 warnings\n");
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    let home_settings = sb.root.join("home/.claude/settings.json");
-    let local_settings = sb.root.join("repo/.claude/settings.local.json");
+        .stderr("cam: 2 problems, 3 warnings\n");
+    let out = stdout_of(&assert);
     for expected in [
-        "fail  claude: cannot find the real `claude` on PATH\n      hint: install Claude Code, or set CAM_CLAUDE_BIN to its full path\n".to_owned(),
-        "info  shim: not installed\n      hint: use `cam exec`, or run `cam shim install`\n".to_owned(),
-        format!("fail  account personal: no token in the test store at {}\n      hint: add one with `cam add personal`\n", sb.store().display()),
-        "fail  account work: no token in ".to_owned(),
-        "ok    here: none (pass-through: no CAM_ACCOUNT, .claude-account or default)\n".to_owned(),
-        "warn  environment: ANTHROPIC_API_KEY is set, so Claude Code uses it instead of cam's token or your /login\n      hint: unset it to use the account cam picks\n".to_owned(),
-        format!("warn  settings: {} sets apiKeyHelper, so Claude Code uses its key instead of cam's token or your /login\n", home_settings.display()),
-        format!("warn  settings: {} sets ANTHROPIC_AUTH_TOKEN in `env`, so Claude Code uses it instead of cam's token or your /login\n", home_settings.display()),
-        format!("warn  settings: {} sets CLAUDE_CODE_USE_BEDROCK in `env`, so Claude Code uses Amazon Bedrock instead of cam's token or your /login\n", local_settings.display()),
+        "info  system: Claude Code's own setup isn't logged in\n      hint: run `cam login system` if you use it\n".to_owned(),
+        "fail  account personal: not logged in\n      hint: run `cam login personal`\n".to_owned(),
+        format!(
+            "fail  account work: no dir at {}\n      hint: set it up again with `cam add work`\n",
+            sb.account_dir("work").display()
+        ),
+        "warn  environment: ANTHROPIC_API_KEY is set, so Claude Code uses it instead of the login\n".to_owned(),
+        format!(
+            "warn  settings: {} sets apiKeyHelper, so Claude Code uses its key instead of the login\n",
+            settings.display()
+        ),
+        format!(
+            "warn  settings: {} sets ANTHROPIC_AUTH_TOKEN in `env`, so Claude Code uses it instead of the login\n",
+            settings.display()
+        ),
     ] {
-        assert!(stdout.contains(&expected), "missing {expected:?} in:\n{stdout}");
+        assert!(out.contains(&expected), "missing {expected:?} in:\n{out}");
     }
-    assert!(!stdout.contains("sk-ant-"), "{stdout}");
+    assert!(!out.contains("SECRET"), "{out}");
+}
+
+#[test]
+fn doctor_checks_each_login_without_what_outranks_it() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
+    sb.logged_in("personal", "me@home.org");
+    sb.cam(&sb.root)
+        .arg("doctor")
+        .env("ANTHROPIC_API_KEY", "sk-ant-api03-FAKE")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "ok    account work: logged in as you@company.com (Acme, team)",
+        ));
+}
+
+#[test]
+fn doctor_warns_about_a_login_about_to_expire_and_the_same_account() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.system_login("me@home.org");
+    sb.logged_in("work", "you@company.com");
+    sb.logged_in("personal", "ME@home.org");
+    let soon = {
+        // Tomorrow, in UTC, as cam counts days.
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let tomorrow = secs / 86_400 + 1;
+        // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+        let z = tomorrow as i64 + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        format!("{year:04}-{month:02}-{day:02}T12:00:00.000Z")
+    };
+    let assert = sb
+        .cam(&sb.root)
+        .arg("doctor")
+        .env("FAKE_EXPIRES", &soon)
+        .assert()
+        .success();
+    let out = stdout_of(&assert);
+    assert!(
+        out.contains("(in 1 day)\n      hint: run `cam login work` to renew it\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "warn  same account: system and personal are both logged in as me@home.org\n      \
+             hint: sign the browser in to the right claude.ai account, then run `cam login personal`\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn doctor_warns_about_an_exported_config_dir() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .arg("doctor")
+        .env("CLAUDE_CONFIG_DIR", "/elsewhere")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "warn  environment: CLAUDE_CONFIG_DIR is exported as /elsewhere, so `system` uses that instead of ~/.claude\n",
+        ));
 }
 
 #[test]
 fn doctor_flags_a_shim_that_comes_too_late() {
-    let sb = Sandbox::new();
+    let sb = Sandbox::with_config(None);
     let claude = sb.fake_claude("bin");
     sb.cam(&sb.root)
         .args(["shim", "install"])
@@ -1611,7 +1941,7 @@ fn doctor_flags_a_shim_that_comes_too_late() {
         .arg("doctor")
         .env("PATH", sb.path(&[&sb.bin(), &sb.shims()]))
         .assert()
-        .code(1)
+        .success()
         .stdout(predicate::str::contains(format!(
             "warn  shim: installed in {}, but plain `claude` runs {} first, without cam\n      \
              hint: run `cam shim install` to see the line to add or move\n",
@@ -1632,7 +1962,7 @@ fn doctor_with_a_broken_config() {
             "fail  config: cannot parse {}",
             sb.config.display()
         )))
-        .stderr("cam: 2 problems\n");
+        .stderr("cam: 1 problem\n");
 }
 
 #[test]
@@ -1648,6 +1978,22 @@ fn doctor_without_a_config_file() {
             sb.config.display()
         )))
         .stdout(predicate::str::ends_with("\nno problems found\n"));
+}
+
+#[test]
+fn doctor_without_claude_still_reports() {
+    let sb = Sandbox::new();
+    sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root)
+        .arg("doctor")
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "fail  claude: cannot find the real `claude` on PATH",
+        ))
+        .stdout(predicate::str::contains(
+            "info  account work: login not checked, since `claude` wasn't found",
+        ));
 }
 
 // --- completions ---
@@ -1669,11 +2015,11 @@ fn completions_fill_in_account_names() {
     };
     let zsh = script("zsh");
     assert!(zsh.starts_with("#compdef cam\n"), "{zsh}");
-    // `remove` gets the names, `use` the names plus `none`.
+    // `remove` gets the names, `use` and `login` the names plus `system`.
     assert!(zsh.contains(":(personal work)'"), "{zsh}");
     assert!(zsh.contains("((personal\\:\"\"\nwork\\:\"\"\n"), "{zsh}");
     assert!(
-        zsh.contains(r#"none\:"pass-through\: Claude Code'\''s own login""#),
+        zsh.contains(r#"system\:"Claude Code'\''s own setup""#),
         "{zsh}"
     );
     assert!(zsh.contains("personal"), "{zsh}");
@@ -1745,7 +2091,7 @@ fn bash_completes_account_names() {
 
     assert_eq!(bash_completes(&script, &["cam", "use", "w"]), ["work"]);
     let use_values = bash_completes(&script, &["cam", "use", ""]);
-    for name in ["personal", "work", "none"] {
+    for name in ["personal", "work", "system"] {
         assert!(
             use_values.iter().any(|value| value == name),
             "{use_values:?}"
@@ -1753,7 +2099,8 @@ fn bash_completes_account_names() {
     }
     let remove_values = bash_completes(&script, &["cam", "remove", ""]);
     assert!(remove_values.iter().any(|value| value == "personal"));
-    assert!(!remove_values.iter().any(|value| value == "none"));
+    assert!(!remove_values.iter().any(|value| value == "system"));
+    assert_eq!(bash_completes(&script, &["cam", "login", "s"]), ["system"]);
     // Subcommands come in their help order.
     let subcommands = bash_completes(&script, &["cam", ""]);
     let position = |name: &str| subcommands.iter().position(|value| value == name);

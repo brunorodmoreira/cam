@@ -1,4 +1,4 @@
-//! Claude Code's settings files, scanned for what would beat cam's token
+//! Claude Code's settings files, scanned for what would beat the login
 //! (see [`crate::conflict`]). Only names are reported, never values:
 //! `env` values and `apiKeyHelper` commands can hold secrets.
 //!
@@ -20,9 +20,8 @@ use serde_json::Value;
 
 use crate::conflict::{CLOUD, Conflict, is_truthy};
 use crate::discover::same_file;
-use crate::launch::{ENV_TOKEN, OUTRANKING};
+use crate::launch::{ENV_OAUTH_TOKEN, OUTRANKING};
 
-pub const ENV_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 const DIR: &str = ".claude";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,12 +111,13 @@ pub fn scan(text: &str, scope: Scope) -> Result<Vec<Conflict>, serde_json::Error
         }
     }
     for var in OUTRANKING {
+        // Project and local files can't set the OAuth token.
+        if var == ENV_OAUTH_TOKEN && scope == Scope::Project {
+            continue;
+        }
         if value(var).is_some_and(|value| !value.is_empty()) {
             found.push(Conflict::Credential(var));
         }
-    }
-    if scope == Scope::User && value(ENV_TOKEN).is_some_and(|value| !value.is_empty()) {
-        found.push(Conflict::Token);
     }
     Ok(found)
 }
@@ -166,7 +166,7 @@ mod tests {
             Conflict::Credential("ANTHROPIC_API_KEY"),
         ];
         let mut user = common.clone();
-        user.push(Conflict::Token);
+        user.push(Conflict::Credential("CLAUDE_CODE_OAUTH_TOKEN"));
         assert_eq!(scan(text, Scope::User).unwrap(), user);
         // Project files can't set the token.
         assert_eq!(scan(text, Scope::Project).unwrap(), common);

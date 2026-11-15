@@ -12,35 +12,24 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use serde::Deserialize;
-use toml::value::{Date, Datetime};
 use toml_edit::{DocumentMut, Item, Table};
 
-use crate::account::{NONE, Selection, is_valid_name};
+use crate::account::{SYSTEM, is_valid_name};
 use crate::error::Error;
-use crate::resolve::Origin;
 
 pub const ENV_CONFIG: &str = "CAM_CONFIG";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    default: Option<String>,
     #[serde(default)]
     accounts: BTreeMap<String, Account>,
 }
 
+/// An account's settings. None yet: M8 adds what it shares.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Account {
-    pub token_created: Option<Datetime>,
-}
-
-/// What [`remove_account`] changed.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Removed {
-    pub existed: bool,
-    pub was_default: bool,
-}
+pub struct Account {}
 
 /// `$CAM_CONFIG` if set and non-empty, else `<home>/.config/cam/config.toml`.
 pub fn path(env: Option<OsString>, home: Option<PathBuf>) -> Result<PathBuf, Error> {
@@ -66,44 +55,33 @@ impl Config {
     }
 
     fn parse(text: &str, path: &Path) -> Result<Self, Error> {
-        let config: Self = toml::from_str(text).map_err(|err| Error::ParseConfig {
-            path: path.to_owned(),
-            source: Box::new(err),
+        let config: Self = toml::from_str(text).map_err(|err| {
+            if is_token_mode(text) {
+                Error::TokenModeConfig {
+                    path: path.to_owned(),
+                }
+            } else {
+                Error::ParseConfig {
+                    path: path.to_owned(),
+                    source: Box::new(err),
+                }
+            }
         })?;
         config.validate(path)?;
         Ok(config)
     }
 
-    /// Account names must be valid and not `none`; `default` must be `none`
-    /// or a configured account.
+    /// Account names must be valid and not `system`.
     fn validate(&self, path: &Path) -> Result<(), Error> {
         if let Some(name) = self
             .accounts
             .keys()
-            .find(|name| !is_valid_name(name) || name.as_str() == NONE)
+            .find(|name| !is_valid_name(name) || name.as_str() == SYSTEM)
         {
             return Err(Error::InvalidConfigAccount {
                 path: path.to_owned(),
                 name: name.clone(),
             });
-        }
-        if let Some(name) = &self.default {
-            let origin = || Origin::Default(path.to_owned());
-            match Selection::parse(name) {
-                None => {
-                    return Err(Error::InvalidName {
-                        name: name.clone(),
-                        origin: origin(),
-                    });
-                }
-                Some(Selection::Account(name)) if !self.has_account(&name) => {
-                    return Err(Error::UnknownAccount {
-                        name,
-                        origin: origin(),
-                    });
-                }
-                Some(_) => {}
-            }
         }
         Ok(())
     }
@@ -115,16 +93,29 @@ impl Config {
     pub fn accounts(&self) -> &BTreeMap<String, Account> {
         &self.accounts
     }
-
-    /// The configured `default`, if any.
-    pub fn default_selection(&self) -> Option<Selection> {
-        self.default.as_deref().and_then(Selection::parse)
-    }
 }
 
-/// Records `name` with `token_created = created`. An existing entry is
-/// updated in place, so its comments survive.
-pub fn add_account(path: &Path, name: &str, created: Date) -> Result<(), Error> {
+/// Whether `text` is a config from token mode (M1–M6): it has a top-level
+/// `default`, or an account with `token_created`.
+fn is_token_mode(text: &str) -> bool {
+    let Ok(table) = toml::from_str::<toml::Table>(text) else {
+        return false;
+    };
+    let has_token_date = table
+        .get("accounts")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|accounts| {
+            accounts.values().any(|account| {
+                account
+                    .as_table()
+                    .is_some_and(|account| account.contains_key("token_created"))
+            })
+        });
+    table.contains_key("default") || has_token_date
+}
+
+/// Records `name`. An existing entry is left as it is, comments included.
+pub fn add_account(path: &Path, name: &str) -> Result<(), Error> {
     edit(path, |doc| {
         let accounts = doc.entry("accounts").or_insert_with(|| {
             let mut table = Table::new();
@@ -137,32 +128,15 @@ pub fn add_account(path: &Path, name: &str, created: Date) -> Result<(), Error> 
             table.decor_mut().set_prefix("\n");
             accounts.insert(name, Item::Table(table));
         }
-        let entry = accounts.get_mut(name)?.as_table_like_mut()?;
-        let created = Datetime {
-            date: Some(created),
-            time: None,
-            offset: None,
-        };
-        entry.insert("token_created", toml_edit::value(created));
         Some(())
     })
 }
 
-/// Deletes the entry for `name`, and `default` if it named `name`.
-pub fn remove_account(path: &Path, name: &str) -> Result<Removed, Error> {
-    edit(path, |doc| {
-        let existed = match doc.get_mut("accounts") {
-            Some(accounts) => accounts.as_table_like_mut()?.remove(name).is_some(),
-            None => false,
-        };
-        let was_default = doc.get("default").and_then(Item::as_str) == Some(name);
-        if was_default {
-            doc.remove("default");
-        }
-        Some(Removed {
-            existed,
-            was_default,
-        })
+/// Deletes the entry for `name`. Returns whether there was one.
+pub fn remove_account(path: &Path, name: &str) -> Result<bool, Error> {
+    edit(path, |doc| match doc.get_mut("accounts") {
+        Some(accounts) => Some(accounts.as_table_like_mut()?.remove(name).is_some()),
+        None => Some(false),
     })
 }
 
@@ -190,7 +164,9 @@ fn edit<T>(path: &Path, change: impl FnOnce(&mut DocumentMut) -> Option<T>) -> R
         path: path.to_owned(),
     })?;
     let mut new_text = doc.to_string();
-    if text.trim().is_empty() {
+    // Don't start the file with blank lines it didn't have, as when the
+    // first table goes and the next one's leading blank line stays.
+    if !text.starts_with(char::is_whitespace) || text.trim().is_empty() {
         new_text = new_text.trim_start().to_owned();
     }
     if new_text != text {
@@ -237,6 +213,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::Tree;
 
     fn parse(text: &str) -> Result<Config, Error> {
         Config::parse(text, Path::new("/cfg/config.toml"))
@@ -244,40 +221,27 @@ mod tests {
 
     #[test]
     fn parses_spec_example() {
-        let config = parse(
-            "default = \"personal\"\n\n\
-             [accounts.work]\ntoken_created = 2026-11-11\n\n\
-             [accounts.personal]\n",
-        )
-        .unwrap();
-        assert_eq!(
-            config.default_selection(),
-            Some(Selection::Account("personal".into()))
-        );
+        let config = parse("[accounts.work]\n\n[accounts.personal]\n").unwrap();
         assert!(config.has_account("work"));
         assert!(config.has_account("personal"));
         assert!(!config.has_account("oss"));
-        let work = &config.accounts["work"];
-        assert_eq!(work.token_created.unwrap().to_string(), "2026-11-11");
     }
 
     #[test]
     fn empty_config() {
-        let config = parse("").unwrap();
-        assert_eq!(config.default_selection(), None);
-        assert!(!config.has_account("work"));
+        assert!(parse("").unwrap().accounts().is_empty());
     }
 
     #[test]
     fn missing_file_is_empty_config() {
-        let tree = crate::testutil::Tree::new();
+        let tree = Tree::new();
         let config = Config::load(&tree.root.join("nope.toml")).unwrap();
-        assert_eq!(config.default_selection(), None);
+        assert!(config.accounts().is_empty());
     }
 
     #[test]
     fn load_reads_file() {
-        let tree = crate::testutil::Tree::new();
+        let tree = Tree::new();
         let path = tree.config("[accounts.work]\n");
         assert!(Config::load(&path).unwrap().has_account("work"));
     }
@@ -285,7 +249,7 @@ mod tests {
     #[test]
     fn rejects_bad_toml() {
         assert!(matches!(
-            parse("default = "),
+            parse("accounts = "),
             Err(Error::ParseConfig { .. })
         ));
     }
@@ -293,13 +257,25 @@ mod tests {
     #[test]
     fn rejects_unknown_keys() {
         assert!(matches!(
-            parse("defualt = \"work\"\n[accounts.work]\n"),
+            parse("acounts = 1\n[accounts.work]\n"),
             Err(Error::ParseConfig { .. })
         ));
         assert!(matches!(
-            parse("[accounts.work]\nemial = \"x@y.z\"\n"),
+            parse("[accounts.work]\nemail = \"x@y.z\"\n"),
             Err(Error::ParseConfig { .. })
         ));
+    }
+
+    #[test]
+    fn explains_a_token_mode_config() {
+        for text in [
+            "default = \"work\"\n[accounts.work]\n",
+            "[accounts.work]\ntoken_created = 2026-11-11\n",
+        ] {
+            let err = parse(text).unwrap_err();
+            assert!(matches!(err, Error::TokenModeConfig { .. }), "{text}");
+            assert!(err.to_string().contains("token mode"), "{err}");
+        }
     }
 
     #[test]
@@ -311,38 +287,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_none_as_account_name() {
+    fn rejects_system_as_account_name() {
         assert!(matches!(
-            parse("[accounts.none]\n"),
-            Err(Error::InvalidConfigAccount { name, .. }) if name == "none"
+            parse("[accounts.system]\n"),
+            Err(Error::InvalidConfigAccount { name, .. }) if name == "system"
         ));
-    }
-
-    #[test]
-    fn rejects_unknown_default() {
-        let err = parse("default = \"ghost\"\n[accounts.work]\n").unwrap_err();
-        assert!(matches!(
-            &err,
-            Error::UnknownAccount { name, origin: Origin::Default(_) } if name == "ghost"
-        ));
-        assert!(err.to_string().contains("cam add ghost"));
-    }
-
-    #[test]
-    fn rejects_invalid_default() {
-        assert!(matches!(
-            parse("default = \"Work\"\n"),
-            Err(Error::InvalidName {
-                origin: Origin::Default(_),
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn default_none_is_pass_through() {
-        let config = parse("default = \"none\"\n").unwrap();
-        assert_eq!(config.default_selection(), Some(Selection::PassThrough));
+        // Token mode's reserved name is an ordinary one now.
+        assert!(parse("[accounts.none]\n").unwrap().has_account("none"));
     }
 
     #[test]
@@ -370,14 +321,6 @@ mod tests {
 
     // --- editing ---
 
-    use crate::testutil::Tree;
-
-    const DAY: Date = Date {
-        year: 2026,
-        month: 11,
-        day: 11,
-    };
-
     fn read(path: &Path) -> String {
         fs::read_to_string(path).unwrap()
     }
@@ -386,52 +329,38 @@ mod tests {
     fn add_creates_missing_file_and_dirs() {
         let tree = Tree::new();
         let path = tree.root.join("nested/cam/config.toml");
-        add_account(&path, "work", DAY).unwrap();
-        assert_eq!(read(&path), "[accounts.work]\ntoken_created = 2026-11-11\n");
+        add_account(&path, "work").unwrap();
+        assert_eq!(read(&path), "[accounts.work]\n");
         assert!(Config::load(&path).unwrap().has_account("work"));
     }
 
     #[test]
     fn add_keeps_comments_and_other_entries() {
         let tree = Tree::new();
-        let path = tree.config(
-            "# my accounts\ndefault = \"personal\" # most folders\n\n\
-             [accounts.personal]\ntoken_created = 2026-11-02 # home\n",
-        );
-        add_account(&path, "work", DAY).unwrap();
+        let path = tree.config("# my accounts\n\n[accounts.personal] # home\n");
+        add_account(&path, "work").unwrap();
         assert_eq!(
             read(&path),
-            "# my accounts\ndefault = \"personal\" # most folders\n\n\
-             [accounts.personal]\ntoken_created = 2026-11-02 # home\n\n\
-             [accounts.work]\ntoken_created = 2026-11-11\n"
+            "# my accounts\n\n[accounts.personal] # home\n\n[accounts.work]\n"
         );
     }
 
     #[test]
-    fn add_updates_existing_entry_in_place() {
+    fn add_leaves_an_existing_entry_alone() {
         let tree = Tree::new();
-        let path = tree.config(
-            "# work stuff\n[accounts.work]\ntoken_created = 2025-01-01\n\n\
-             [accounts.personal]\n",
-        );
-        add_account(&path, "work", DAY).unwrap();
-        let text = read(&path);
-        assert!(
-            text.starts_with("# work stuff\n[accounts.work]\n"),
-            "{text}"
-        );
-        assert!(text.contains("token_created = 2026-11-11"), "{text}");
-        assert!(!text.contains("2025-01-01"), "{text}");
-        assert!(Config::load(&path).unwrap().has_account("personal"));
+        let original = "# work stuff\n[accounts.work] # day job\n\n[accounts.personal]\n";
+        let path = tree.config(original);
+        add_account(&path, "work").unwrap();
+        assert_eq!(read(&path), original);
     }
 
     #[test]
     fn edit_refuses_an_invalid_config() {
         let tree = Tree::new();
-        let broken = "defualt = \"work\"\n";
+        let broken = "acounts = 1\n";
         let path = tree.config(broken);
         assert!(matches!(
-            add_account(&path, "work", DAY),
+            add_account(&path, "work"),
             Err(Error::ParseConfig { .. })
         ));
         assert_eq!(read(&path), broken);
@@ -441,43 +370,27 @@ mod tests {
     fn add_works_with_inline_account_tables() {
         let tree = Tree::new();
         let path = tree.config("accounts = { personal = {} }\n");
-        add_account(&path, "work", DAY).unwrap();
+        add_account(&path, "work").unwrap();
         let config = Config::load(&path).unwrap();
         assert!(config.has_account("personal") && config.has_account("work"));
     }
 
     #[test]
-    fn remove_deletes_entry_and_clears_default() {
+    fn remove_deletes_the_entry() {
         let tree = Tree::new();
-        let path = tree.config("default = \"work\"\n\n[accounts.work]\n\n[accounts.personal]\n");
-        assert_eq!(
-            remove_account(&path, "work").unwrap(),
-            Removed {
-                existed: true,
-                was_default: true
-            }
-        );
+        let path = tree.config("[accounts.work]\n\n[accounts.personal]\n");
+        assert!(remove_account(&path, "work").unwrap());
         let config = Config::load(&path).unwrap();
         assert!(!config.has_account("work"));
         assert!(config.has_account("personal"));
-        assert_eq!(config.default_selection(), None);
     }
 
     #[test]
-    fn remove_keeps_other_default() {
+    fn remove_the_first_entry_leaves_no_leading_blank_line() {
         let tree = Tree::new();
-        let path = tree.config("default = \"personal\"\n[accounts.work]\n[accounts.personal]\n");
-        assert_eq!(
-            remove_account(&path, "work").unwrap(),
-            Removed {
-                existed: true,
-                was_default: false
-            }
-        );
-        assert_eq!(
-            Config::load(&path).unwrap().default_selection(),
-            Some(Selection::Account("personal".into()))
-        );
+        let path = tree.config("[accounts.work]\n\n[accounts.personal]\n");
+        assert!(remove_account(&path, "work").unwrap());
+        assert_eq!(read(&path), "[accounts.personal]\n");
     }
 
     #[test]
@@ -485,17 +398,11 @@ mod tests {
         let tree = Tree::new();
         let original = "# keep me\n[accounts.personal]\n";
         let path = tree.config(original);
-        assert_eq!(
-            remove_account(&path, "work").unwrap(),
-            Removed {
-                existed: false,
-                was_default: false
-            }
-        );
+        assert!(!remove_account(&path, "work").unwrap());
         assert_eq!(read(&path), original);
 
         let missing = tree.root.join("missing.toml");
-        assert!(!remove_account(&missing, "work").unwrap().existed);
+        assert!(!remove_account(&missing, "work").unwrap());
         assert!(!missing.exists(), "removing must not create the file");
     }
 
@@ -507,7 +414,7 @@ mod tests {
         let link = tree.dir("home/.config/cam").join("config.toml");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        add_account(&link, "work", DAY).unwrap();
+        add_account(&link, "work").unwrap();
         assert!(
             fs::symlink_metadata(&link)
                 .unwrap()
@@ -523,7 +430,7 @@ mod tests {
         let tree = Tree::new();
         let path = tree.config("[accounts.personal]\n");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        add_account(&path, "work", DAY).unwrap();
+        add_account(&path, "work").unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
@@ -536,7 +443,7 @@ mod tests {
         let path = dir.join("config.toml");
         fs::write(&path, "").unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
-        let result = add_account(&path, "work", DAY);
+        let result = add_account(&path, "work");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(matches!(result, Err(Error::Write { .. })));
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);

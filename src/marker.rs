@@ -193,7 +193,7 @@ mod tests {
         let path = write(&dir, &Selection::Account("work".into())).unwrap();
         assert_eq!(path, dir.join(FILE_NAME));
         assert_eq!(fs::read_to_string(&path).unwrap(), "work\n");
-        write(&dir, &Selection::PassThrough).unwrap();
-        assert_eq!(read(&path).unwrap(), Some("none".into()));
+        write(&dir, &Selection::System).unwrap();
+        assert_eq!(read(&path).unwrap(), Some("system".into()));
     }
 }

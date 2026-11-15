@@ -1,13 +1,12 @@
 //! Account resolution. First match wins:
 //!
-//! 1. `CAM_ACCOUNT` (a name, or `none`).
+//! 1. `CAM_ACCOUNT` (a name, or `system`).
 //! 2. The nearest `.claude-account`, from the current directory up to `/`.
-//! 3. `default` in the config file.
-//! 4. Nothing: pass-through.
+//! 3. Nothing: `system`, Claude Code's own setup.
 //!
 //! Unknown or invalid names are hard errors; resolution never falls back to
-//! a lower step. The config is read only when a step needs it, so `none`
-//! from the env or a marker works even when the config is broken.
+//! a lower step. The config is read only to check that a name exists, so
+//! `system` works even when the config is broken.
 
 use std::env;
 use std::fmt;
@@ -25,8 +24,6 @@ pub const ENV_ACCOUNT: &str = "CAM_ACCOUNT";
 pub enum Origin {
     Env,
     Marker(PathBuf),
-    /// `default` in the config file at this path.
-    Default(PathBuf),
     Nothing,
 }
 
@@ -35,8 +32,7 @@ impl fmt::Display for Origin {
         match self {
             Self::Env => f.write_str(ENV_ACCOUNT),
             Self::Marker(path) => write!(f, "{}", path.display()),
-            Self::Default(path) => write!(f, "default in {}", path.display()),
-            Self::Nothing => write!(f, "no {ENV_ACCOUNT}, {} or default", marker::FILE_NAME),
+            Self::Nothing => write!(f, "no {ENV_ACCOUNT} or {}", marker::FILE_NAME),
         }
     }
 }
@@ -49,12 +45,9 @@ pub struct Resolution {
 
 impl fmt::Display for Resolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.selection, &self.origin) {
-            (Selection::PassThrough, Origin::Nothing) => {
-                write!(f, "none (pass-through: {})", self.origin)
-            }
-            (Selection::PassThrough, origin) => write!(f, "none (pass-through, from {origin})"),
-            (Selection::Account(name), origin) => write!(f, "{name} (from {origin})"),
+        match &self.origin {
+            Origin::Nothing => write!(f, "{} ({})", self.selection, self.origin),
+            origin => write!(f, "{} (from {origin})", self.selection),
         }
     }
 }
@@ -79,7 +72,12 @@ pub fn resolve(
         Some(name) => (name.to_owned(), Origin::Env),
         None => match marker::find(cwd)? {
             Some((path, name)) => (name, Origin::Marker(path)),
-            None => return from_default(config_path),
+            None => {
+                return Ok(Resolution {
+                    selection: Selection::System,
+                    origin: Origin::Nothing,
+                });
+            }
         },
     };
     let Some(selection) = Selection::parse(&name) else {
@@ -96,19 +94,6 @@ pub fn resolve(
     Ok(Resolution { selection, origin })
 }
 
-fn from_default(config_path: &Path) -> Result<Resolution, Error> {
-    Ok(match Config::load(config_path)?.default_selection() {
-        Some(selection) => Resolution {
-            selection,
-            origin: Origin::Default(config_path.to_owned()),
-        },
-        None => Resolution {
-            selection: Selection::PassThrough,
-            origin: Origin::Nothing,
-        },
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -116,11 +101,9 @@ mod tests {
     use super::*;
     use crate::testutil::Tree;
 
-    const CONFIG: &str = "default = \"personal\"\n\
-                          [accounts.work]\n\
+    const CONFIG: &str = "[accounts.work]\n\
                           [accounts.personal]\n\
                           [accounts.oss]\n";
-    const CONFIG_NO_DEFAULT: &str = "[accounts.work]\n[accounts.personal]\n";
     const BROKEN_CONFIG: &str = "this is not toml";
 
     fn account(name: &str, origin: Origin) -> Resolution {
@@ -130,9 +113,9 @@ mod tests {
         }
     }
 
-    fn pass_through(origin: Origin) -> Resolution {
+    fn system(origin: Origin) -> Resolution {
         Resolution {
-            selection: Selection::PassThrough,
+            selection: Selection::System,
             origin,
         }
     }
@@ -181,36 +164,25 @@ mod tests {
     }
 
     #[test]
-    fn none_marker_overrides_parent() {
+    fn system_marker_overrides_parent() {
         let tree = Tree::new();
         let config = tree.config(CONFIG);
         tree.marker("work", "work\n");
-        let none = tree.marker("work/oss", "none\n");
+        let none = tree.marker("work/oss", "system\n");
         assert_eq!(
             resolve(None, &tree.dir("work/oss/repo"), &config).unwrap(),
-            pass_through(Origin::Marker(none))
+            system(Origin::Marker(none))
         );
     }
 
     #[test]
-    fn none_marker_overrides_default() {
-        let tree = Tree::new();
-        let config = tree.config(CONFIG);
-        let none = tree.marker("oss", "none\n");
-        assert_eq!(
-            resolve(None, &tree.dir("oss"), &config).unwrap(),
-            pass_through(Origin::Marker(none))
-        );
-    }
-
-    #[test]
-    fn none_marker_does_not_read_config() {
+    fn system_marker_does_not_read_config() {
         let tree = Tree::new();
         let config = tree.config(BROKEN_CONFIG);
-        let none = tree.marker("oss", "none\n");
+        let none = tree.marker("oss", "system\n");
         assert_eq!(
             resolve(None, &tree.dir("oss"), &config).unwrap(),
-            pass_through(Origin::Marker(none))
+            system(Origin::Marker(none))
         );
     }
 
@@ -303,7 +275,7 @@ mod tests {
     // --- Step 1: CAM_ACCOUNT ---
 
     #[test]
-    fn env_beats_marker_and_default() {
+    fn env_beats_marker() {
         let tree = Tree::new();
         let config = tree.config(CONFIG);
         tree.marker("w", "work\n");
@@ -314,13 +286,13 @@ mod tests {
     }
 
     #[test]
-    fn env_none_forces_pass_through() {
+    fn env_none_forces_system() {
         let tree = Tree::new();
         let config = tree.config(CONFIG);
         tree.marker("w", "work\n");
         assert_eq!(
-            resolve(Some("none"), &tree.dir("w"), &config).unwrap(),
-            pass_through(Origin::Env)
+            resolve(Some("system"), &tree.dir("w"), &config).unwrap(),
+            system(Origin::Env)
         );
     }
 
@@ -336,12 +308,12 @@ mod tests {
     }
 
     #[test]
-    fn env_none_does_not_read_config() {
+    fn env_system_does_not_read_config() {
         let tree = Tree::new();
         let config = tree.config(BROKEN_CONFIG);
         assert_eq!(
-            resolve(Some("none"), &tree.dir("w"), &config).unwrap(),
-            pass_through(Origin::Env)
+            resolve(Some("system"), &tree.dir("w"), &config).unwrap(),
+            system(Origin::Env)
         );
     }
 
@@ -389,77 +361,40 @@ mod tests {
         ));
     }
 
-    // --- Step 3: config default ---
+    // --- Step 3: system ---
 
     #[test]
-    fn default_applies_without_marker() {
+    fn nothing_set_is_system() {
         let tree = Tree::new();
         let config = tree.config(CONFIG);
         assert_eq!(
-            resolve(None, &tree.dir("a/b"), &config).unwrap(),
-            account("personal", Origin::Default(config.clone()))
-        );
-    }
-
-    #[test]
-    fn marker_beats_default() {
-        let tree = Tree::new();
-        let config = tree.config(CONFIG);
-        let marker = tree.marker("w", "work\n");
-        assert_eq!(
-            resolve(None, &tree.dir("w"), &config).unwrap(),
-            account("work", Origin::Marker(marker))
-        );
-    }
-
-    #[test]
-    fn default_none_is_pass_through() {
-        let tree = Tree::new();
-        let config = tree.config("default = \"none\"\n[accounts.work]\n");
-        assert_eq!(
             resolve(None, &tree.dir("a"), &config).unwrap(),
-            pass_through(Origin::Default(config.clone()))
+            system(Origin::Nothing)
         );
     }
 
     #[test]
-    fn unknown_default_is_an_error() {
-        let tree = Tree::new();
-        let config = tree.config("default = \"ghost\"\n[accounts.work]\n");
-        assert!(matches!(
-            resolve(None, &tree.dir("a"), &config),
-            Err(Error::UnknownAccount { name, origin: Origin::Default(_) }) if name == "ghost"
-        ));
-    }
-
-    // --- Step 4: pass-through ---
-
-    #[test]
-    fn nothing_set_is_pass_through() {
-        let tree = Tree::new();
-        let config = tree.config(CONFIG_NO_DEFAULT);
-        assert_eq!(
-            resolve(None, &tree.dir("a"), &config).unwrap(),
-            pass_through(Origin::Nothing)
-        );
-    }
-
-    #[test]
-    fn missing_config_is_pass_through() {
+    fn missing_or_broken_config_is_still_system() {
         let tree = Tree::new();
         assert_eq!(
             resolve(None, &tree.dir("a"), &tree.root.join("missing.toml")).unwrap(),
-            pass_through(Origin::Nothing)
+            system(Origin::Nothing)
+        );
+        let broken = tree.config(BROKEN_CONFIG);
+        assert_eq!(
+            resolve(None, &tree.dir("a"), &broken).unwrap(),
+            system(Origin::Nothing)
         );
     }
 
     #[test]
-    fn broken_config_fails_at_the_default_step() {
+    fn a_none_marker_is_an_ordinary_name() {
         let tree = Tree::new();
-        let config = tree.config(BROKEN_CONFIG);
+        let config = tree.config(CONFIG);
+        tree.marker("a", "none\n");
         assert!(matches!(
             resolve(None, &tree.dir("a"), &config),
-            Err(Error::ParseConfig { .. })
+            Err(Error::UnknownAccount { name, .. }) if name == "none"
         ));
     }
 
@@ -468,32 +403,20 @@ mod tests {
     #[test]
     fn display() {
         let marker = PathBuf::from("/w/.claude-account");
-        let config = PathBuf::from("/c/config.toml");
         let cases = [
             (account("work", Origin::Env), "work (from CAM_ACCOUNT)"),
             (
                 account("work", Origin::Marker(marker.clone())),
                 "work (from /w/.claude-account)",
             ),
+            (system(Origin::Env), "system (from CAM_ACCOUNT)"),
             (
-                account("work", Origin::Default(config.clone())),
-                "work (from default in /c/config.toml)",
+                system(Origin::Marker(marker)),
+                "system (from /w/.claude-account)",
             ),
             (
-                pass_through(Origin::Env),
-                "none (pass-through, from CAM_ACCOUNT)",
-            ),
-            (
-                pass_through(Origin::Marker(marker)),
-                "none (pass-through, from /w/.claude-account)",
-            ),
-            (
-                pass_through(Origin::Default(config)),
-                "none (pass-through, from default in /c/config.toml)",
-            ),
-            (
-                pass_through(Origin::Nothing),
-                "none (pass-through: no CAM_ACCOUNT, .claude-account or default)",
+                system(Origin::Nothing),
+                "system (no CAM_ACCOUNT or .claude-account)",
             ),
         ];
         for (resolution, expected) in cases {

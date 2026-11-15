@@ -38,7 +38,7 @@ pub fn real_claude(search: &Search) -> Result<PathBuf, Error> {
     }
     env::split_paths(search.path.unwrap_or(OsStr::new("")))
         // An empty or relative entry means the current directory, and a
-        // `claude` that a repo ships must never receive a token.
+        // `claude` that a repo ships must never be what cam runs.
         .filter(|dir| dir.is_absolute())
         .filter(|dir| !search.shim_dir.is_some_and(|shim| same_file(dir, shim)))
         .map(|dir| dir.join(BINARY))

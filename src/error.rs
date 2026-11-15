@@ -1,8 +1,8 @@
-//! Errors from config handling, markers, resolution, the token store and
-//! launching `claude`.
+//! Errors from config handling, markers, resolution, account dirs, `claude
+//! auth` and launching `claude`.
 //!
 //! Messages may contain user-supplied names, so everything printed goes
-//! through [`crate::redact`] first. Token errors never include the input.
+//! through [`crate::redact`] first.
 
 use std::io;
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("cannot find the home directory; set CAM_CONFIG")]
+    #[error("cannot find the home directory; set HOME")]
     NoHome,
 
     #[error("CAM_ACCOUNT is not valid UTF-8")]
@@ -50,13 +50,20 @@ pub enum Error {
     ConfigShape { path: PathBuf },
 
     #[error(
-        "invalid account [accounts.{name}] in {path}: names must match {rule} and \"none\" is reserved",
+        "{path} is from cam's token mode (it has `default` or `token_created`)\n\
+         hint: delete those lines, then run `cam add <name>` for each account. Old tokens stay in the \
+         Keychain until you delete them: `security delete-generic-password -s cam -a <name>`"
+    )]
+    TokenModeConfig { path: PathBuf },
+
+    #[error(
+        "invalid account [accounts.{name}] in {path}: names must match {rule} and \"system\" is reserved",
         rule = NAME_RULE
     )]
     InvalidConfigAccount { path: PathBuf, name: String },
 
     #[error(
-        "{path} names no account\nhint: put an account name (or `none`) in it, or remove it with `cam unuse`"
+        "{path} names no account\nhint: put an account name (or `system`) in it, or remove it with `cam unuse`"
     )]
     EmptyMarker { path: PathBuf },
 
@@ -72,49 +79,35 @@ pub enum Error {
     #[error("unknown account \"{name}\"\nhint: add it with `cam add {name}`")]
     UnknownAccountArg { name: String },
 
-    #[error("\"none\" is reserved and can't be an account name")]
+    #[error("\"system\" is reserved: it's Claude Code's own setup, not an account")]
     ReservedName,
 
-    #[error("cannot read the token")]
-    ReadToken(#[source] io::Error),
-
-    #[error("no token entered")]
-    TokenEmpty,
+    #[error(
+        "{} already exists\nhint: to log in again, run `cam login {name}`; to start over, `cam remove {name}` first",
+        dir.display()
+    )]
+    AccountExists { name: String, dir: PathBuf },
 
     #[error(
-        "that looks like an Anthropic API key; cam needs the OAuth token that `claude setup-token` prints"
+        "account \"{name}\" has no dir at {}\nhint: set it up again with `cam add {name}`",
+        dir.display()
     )]
-    TokenIsApiKey,
+    NoAccountDir { name: String, dir: PathBuf },
 
-    #[error(
-        "that doesn't look like a token from `claude setup-token` (it starts with sk-ant- and has no spaces)"
-    )]
-    TokenMalformed,
-
-    #[error(
-        "a token for \"{name}\" is already stored in {location}\nhint: pass --force to replace it"
-    )]
-    TokenExists { name: String, location: String },
-
-    #[error("nothing to remove: \"{name}\" has no config entry and no stored token")]
+    #[error("nothing to remove: \"{name}\" has no config entry and no account dir")]
     NothingToRemove { name: String },
 
-    #[error("cannot {action} the token for \"{account}\" in {location}")]
-    Store {
-        action: &'static str,
-        account: String,
-        location: String,
-        #[source]
-        source: BoxError,
-    },
+    #[error("the login didn't finish ({status})")]
+    LoginFailed { status: String },
 
-    #[error("no token stored for \"{name}\" in {location}\nhint: add one with `cam add {name}`")]
-    NoToken { name: String, location: String },
+    #[error("\"{name}\" isn't logged in\nhint: run `cam login {name}`")]
+    NotLoggedIn { name: String },
 
-    #[error(
-        "the token stored for \"{name}\" in {location} is not valid\nhint: replace it with `cam add {name} --force`"
-    )]
-    StoredTokenInvalid { name: String, location: String },
+    #[error("cannot read what `claude auth status` reports ({status})")]
+    AuthStatus { status: String },
+
+    #[error("`claude auth logout` failed ({status})")]
+    Logout { status: String },
 
     #[error(
         "cannot find the real `claude` on PATH\nhint: install Claude Code, or set {ENV_CLAUDE_BIN} to its full path"

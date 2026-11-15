@@ -4,10 +4,11 @@ Rust CLI that picks the Claude Code account per folder via `.claude-account` fil
 
 ## Rules
 
-- **Never print, log or store a token** outside the Keychain and the `claude` child's environment. Not in tests, fixtures, error messages, commit messages, or this chat. Redact `sk-ant-…` in any output.
-- Tests never touch the real Keychain or run the real `claude`. Use the test `SecretStore`: `FileStore` in unit tests, and `CAM_TEST_STORE` for `assert_cmd` tests. The `Sandbox` helper in `tests/cli.rs` clears the environment and sets `CAM_TEST_STORE`, `HOME` and a sandbox `PATH`. `cargo test` enables the `test-store` feature on its own.
+- **cam never handles a credential.** Logins are Claude Code's own: cam only runs `claude auth login`, `auth status --json` and `auth logout`. From `auth status` it reads only the email, org, plan and expiry, and from `.claude.json` only `oauthAccount.emailAddress`, since that file holds MCP server secrets. Never print raw `auth status` output or anything else from `.claude.json`.
+- **Never print, log or store a token** or other secret: not in tests, fixtures, error messages, commit messages, or this chat. Redact `sk-ant-…` in any output.
+- Tests never run the real `claude` or touch the real `~/.claude`, `~/.claude.json` or Keychain. The `Sandbox` helper in `tests/cli.rs` clears the environment and sets `CAM_CONFIG`, `HOME`, `PATH` and `FAKE_LOG`, and its `FAKE_CLAUDE` script fakes `claude auth`. Unit tests use temp trees (`testutil::Tree`).
 - Before calling something done, run `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test`.
-- Unix-only (macOS first) for v1. Keep Keychain access behind the `SecretStore` trait.
+- Unix-only (macOS first) for v1.
 
 ## Git
 

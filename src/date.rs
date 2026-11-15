@@ -57,6 +57,37 @@ pub fn age(date: Date, today: Date) -> String {
     }
 }
 
+/// How far ahead `date` is, as of `today`: "today", "in 1 day", "in 12 days".
+pub fn until(date: Date, today: Date) -> String {
+    match to_days(date) - to_days(today) {
+        days if days < 0 => age(date, today),
+        0 => "today".to_owned(),
+        1 => "in 1 day".to_owned(),
+        days => format!("in {days} days"),
+    }
+}
+
+/// The day of an ISO 8601 timestamp, such as `2026-11-16T15:59:25.959Z`.
+/// Only the date part is read; it must be a real calendar day.
+pub fn parse_day(timestamp: &str) -> Option<Date> {
+    let day = timestamp.get(..10)?;
+    let rest = &timestamp[10..];
+    if !(rest.is_empty() || rest.starts_with('T')) {
+        return None;
+    }
+    let mut parts = day.split('-');
+    let (year, month, day) = (parts.next()?, parts.next()?, parts.next()?);
+    if year.len() != 4 || month.len() != 2 || day.len() != 2 {
+        return None;
+    }
+    let date = Date {
+        year: year.parse().ok()?,
+        month: month.parse().ok()?,
+        day: day.parse().ok()?,
+    };
+    (from_days(to_days(date)) == date).then_some(date)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +133,34 @@ mod tests {
         assert_eq!(age(date(2026, 11, 10), today), "1 day ago");
         assert_eq!(age(date(2025, 11, 11), today), "365 days ago");
         assert_eq!(age(date(2026, 11, 12), today), "in the future");
+    }
+
+    #[test]
+    fn until_counts_ahead() {
+        let today = date(2026, 11, 11);
+        assert_eq!(until(date(2026, 11, 11), today), "today");
+        assert_eq!(until(date(2026, 11, 12), today), "in 1 day");
+        assert_eq!(until(date(2026, 12, 9), today), "in 28 days");
+        assert_eq!(until(date(2026, 11, 10), today), "1 day ago");
+    }
+
+    #[test]
+    fn parses_the_day_of_a_timestamp() {
+        assert_eq!(
+            parse_day("2026-11-16T15:59:25.959Z"),
+            Some(date(2026, 11, 16))
+        );
+        assert_eq!(parse_day("2026-11-16"), Some(date(2026, 11, 16)));
+        for bad in [
+            "",
+            "2026-11",
+            "2026-13-01T00:00Z",
+            "2026-02-30",
+            "26-11-16",
+            "2026-11-16x",
+            "2026/11/16",
+        ] {
+            assert_eq!(parse_day(bad), None, "{bad}");
+        }
     }
 }

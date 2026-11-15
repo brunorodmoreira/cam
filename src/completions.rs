@@ -12,7 +12,7 @@ use clap::Command;
 use clap::builder::{PossibleValue, PossibleValuesParser};
 use clap_complete::Shell;
 
-use crate::account::NONE;
+use crate::account::SYSTEM;
 use crate::config::Config;
 use crate::redact::redact;
 
@@ -61,9 +61,9 @@ fn fish_values(cmd: &Command) -> String {
     lines
 }
 
-/// `cmd` with account names as the values of `use` and `remove`. Only for
-/// generating completions: parsing must still accept new names, as `add`
-/// does.
+/// `cmd` with account names as the values of `use`, `login` and `remove`.
+/// Only for generating completions: parsing must still accept new names,
+/// as `add` does.
 fn with_accounts(mut cmd: Command, config: Option<&Config>) -> Command {
     let accounts: Vec<PossibleValue> = config
         .map(|config| {
@@ -74,13 +74,13 @@ fn with_accounts(mut cmd: Command, config: Option<&Config>) -> Command {
                 .collect()
         })
         .unwrap_or_default();
-    let mut with_none = accounts.clone();
-    with_none.push(PossibleValue::new(NONE).help("pass-through: Claude Code's own login"));
+    let mut with_system = accounts.clone();
+    with_system.push(PossibleValue::new(SYSTEM).help("Claude Code's own setup"));
     // Edited in place: `Command::mut_subcommand` would move the subcommand
     // to the end of the list, and bash shows them in list order.
     for sub in cmd.get_subcommands_mut() {
         let values = match sub.get_name() {
-            "use" => with_none.clone(),
+            "use" | "login" => with_system.clone(),
             "remove" if !accounts.is_empty() => accounts.clone(),
             _ => continue,
         };
@@ -100,6 +100,7 @@ mod tests {
     fn cli() -> Command {
         Command::new(BIN)
             .subcommand(Command::new("use").arg(clap::Arg::new("name")))
+            .subcommand(Command::new("login").arg(clap::Arg::new("name")))
             .subcommand(Command::new("remove").arg(clap::Arg::new("name")))
     }
 
@@ -135,21 +136,24 @@ mod tests {
         let cmd = with_accounts(cli(), Some(&config));
         let accounts = [("personal", None), ("work", None)];
         assert_eq!(values(&cmd, "remove"), owned(&accounts));
-        let mut with_none = accounts.to_vec();
-        with_none.push(("none", Some("pass-through: Claude Code's own login")));
-        assert_eq!(values(&cmd, "use"), owned(&with_none));
+        let mut with_system = accounts.to_vec();
+        with_system.push(("system", Some("Claude Code's own setup")));
+        assert_eq!(values(&cmd, "use"), owned(&with_system));
+        assert_eq!(values(&cmd, "login"), owned(&with_system));
         // The subcommands keep their order.
         let names: Vec<&str> = cmd.get_subcommands().map(Command::get_name).collect();
-        assert_eq!(names, ["use", "remove"]);
+        assert_eq!(names, ["use", "login", "remove"]);
     }
 
     #[test]
-    fn without_accounts_only_use_gets_none() {
+    fn without_accounts_use_and_login_get_system() {
         let cmd = with_accounts(cli(), None);
-        assert_eq!(
-            values(&cmd, "use"),
-            owned(&[("none", Some("pass-through: Claude Code's own login"))])
-        );
+        for sub in ["use", "login"] {
+            assert_eq!(
+                values(&cmd, sub),
+                owned(&[("system", Some("Claude Code's own setup"))])
+            );
+        }
         assert_eq!(values(&cmd, "remove"), []);
     }
 
@@ -158,14 +162,14 @@ mod tests {
         let cmd = Command::new(BIN).subcommand(Command::new("use").arg(
             clap::Arg::new("name").value_parser(PossibleValuesParser::new([
                 PossibleValue::new("work").help("some help"),
-                PossibleValue::new("none").help("Claude Code's own"),
+                PossibleValue::new("system").help("Claude Code's own"),
                 PossibleValue::new("plain"),
             ])),
         ));
         assert_eq!(
             fish_values(&cmd),
             "complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'work' -d 'some help'\n\
-             complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'none' -d 'Claude Code\\'s own'\n\
+             complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'system' -d 'Claude Code\\'s own'\n\
              complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'plain'\n"
         );
     }

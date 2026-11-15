@@ -1,4 +1,4 @@
-//! Temp directory trees and fake tokens for unit tests.
+//! Temp directory trees for unit tests.
 
 use std::fs;
 use std::path::PathBuf;
@@ -6,12 +6,6 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use crate::marker::FILE_NAME;
-use crate::token::Token;
-
-/// A fake value shaped like a token. Not a real credential.
-pub fn fake_token(n: u32) -> Token {
-    Token::parse(&format!("sk-ant-oat01-FAKE-unit-test-{n:04}")).unwrap()
-}
 
 pub struct Tree {
     _tmp: TempDir,

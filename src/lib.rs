@@ -2,6 +2,7 @@
 //! See DESIGN.md for the spec. The `cam` binary only calls [`run`].
 
 mod account;
+mod auth;
 mod commands;
 mod completions;
 mod config;
@@ -16,10 +17,8 @@ mod redact;
 mod resolve;
 mod settings;
 mod shim;
-mod store;
 #[cfg(test)]
 mod testutil;
-mod token;
 
 #[cfg(not(unix))]
 compile_error!("cam supports Unix only (macOS first); see DESIGN.md");
@@ -43,27 +42,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Store a token from `claude setup-token` and register the account.
+    /// Create an account and log it in with Claude Code's own login.
     ///
-    /// Prompts for the token with hidden input. If stdin isn't a terminal,
-    /// the token is read from stdin instead.
+    /// The account gets its own Claude Code config dir, under
+    /// ~/.local/share/cam/accounts. cam runs `claude auth login` in it, so
+    /// you pick the account in the browser, as with `/login`.
     Add {
         /// Account name, matching ^[a-z0-9][a-z0-9_-]*$.
         name: String,
-        /// Replace a token that is already stored.
-        #[arg(long)]
-        force: bool,
     },
-    /// Delete an account's token and config entry.
+    /// Log an account in again with Claude Code's own login.
+    ///
+    /// Without a name, logs in the account that applies here. `system` is
+    /// Claude Code's own setup.
+    Login {
+        /// The account, or `system`. Defaults to the one that applies here.
+        name: Option<String>,
+    },
+    /// Log an account out, then delete its dir and config entry.
     Remove {
         /// The account to remove.
         name: String,
     },
-    /// List accounts, their token age and the default.
+    /// List `system` and the accounts, with the email each is logged in as.
     List,
     /// Pin an account to a folder by writing .claude-account.
     Use {
-        /// A configured account, or `none` to force pass-through from this folder down.
+        /// A configured account, or `system` for Claude Code's own setup from this folder down.
         name: String,
         /// Write the marker in DIR instead of the current directory.
         #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
@@ -77,15 +82,14 @@ enum Command {
     },
     /// Show which account applies here, and why.
     Which,
-    /// Show the account that applies here and its token.
+    /// Show the account that applies here, and who it's logged in as.
     ///
-    /// Checks that the token is stored without reading it, so it never
-    /// causes a Keychain prompt.
+    /// Asks `claude auth status`, so it reports what Claude Code would use.
     Whoami,
-    /// Check cam's setup, and anything that would keep `claude` from using
-    /// the account cam picks.
+    /// Check cam's setup, each account's login, and anything that would
+    /// keep `claude` from using the account cam picks.
     ///
-    /// Exits non-zero if a check fails. Never reads a token.
+    /// Exits non-zero if a check fails. Never reads a credential.
     Doctor,
     /// Run the real `claude` with the account that applies here.
     ///
@@ -182,14 +186,9 @@ fn config_path() -> Result<PathBuf, Error> {
 
 fn dispatch(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Add { name, force } => {
-            let store = store::open()?;
-            commands::add(&name, force, &config_path()?, store.as_ref(), token::read)
-        }
-        Command::Remove { name } => {
-            let store = store::open()?;
-            commands::remove(&name, &config_path()?, store.as_ref())
-        }
+        Command::Add { name } => commands::add(&name, &config_path()?),
+        Command::Login { name } => commands::login(name.as_deref(), &config_path()?),
+        Command::Remove { name } => commands::remove(&name, &config_path()?),
         Command::List => commands::list(&config_path()?),
         Command::Use { name, dir } => commands::use_account(&name, dir.as_deref(), &config_path()?),
         Command::Unuse { dir } => commands::unuse(dir.as_deref()),

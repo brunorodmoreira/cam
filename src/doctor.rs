@@ -1,29 +1,25 @@
-//! `cam doctor`'s checks, and the token-age rules `whoami` shares.
+//! `cam doctor`'s checks.
 //!
 //! Each check is ok, info, warn or fail. Only a fail makes `doctor` exit
-//! non-zero. Nothing here reads a token: stored tokens are checked with
-//! [`SecretStore::contains`](crate::store::SecretStore::contains), so
-//! `doctor` can't cause a Keychain prompt.
+//! non-zero. Logins are checked by asking `claude auth status`, never by
+//! reading a credential.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use toml::value::Date;
 
-use crate::config::{Account, Config};
+use crate::account::SYSTEM;
+use crate::auth::{self, Expiry};
+use crate::config::Config;
 use crate::conflict;
-use crate::date;
 use crate::error::Error;
-use crate::launch::{ENV_ACTIVE, ENV_TOKEN};
+use crate::launch::{ENV_ACTIVE, ENV_CONFIG_DIR};
 use crate::resolve::Resolution;
 use crate::settings::{File, Inspection};
 use crate::shim::Reaches;
-
-/// `setup-token` says its tokens are "valid for 1 year".
-pub const LIFETIME_DAYS: i64 = 365;
-/// From here on, `doctor` and `whoami` suggest renewing.
-pub const RENEW_AFTER_DAYS: i64 = 330;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -119,65 +115,6 @@ fn explain(err: &dyn std::error::Error) -> String {
     text
 }
 
-// --- token age ---
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenAge {
-    /// No `token_created` in the config.
-    Unknown,
-    Good {
-        created: Date,
-        expires: Date,
-    },
-    Renew {
-        created: Date,
-        expires: Date,
-    },
-    Expired {
-        created: Date,
-        expires: Date,
-    },
-}
-
-pub fn token_age(created: Option<Date>, today: Date) -> TokenAge {
-    let Some(created) = created else {
-        return TokenAge::Unknown;
-    };
-    let expires = date::from_days(date::to_days(created) + LIFETIME_DAYS);
-    match date::to_days(today) - date::to_days(created) {
-        days if days > LIFETIME_DAYS => TokenAge::Expired { created, expires },
-        days if days >= RENEW_AFTER_DAYS => TokenAge::Renew { created, expires },
-        _ => TokenAge::Good { created, expires },
-    }
-}
-
-impl TokenAge {
-    /// "added 2026-11-11 (3 days ago), good until about 2027-11-11", or
-    /// what's known instead.
-    pub fn describe(self, today: Date) -> String {
-        let added = |created| format!("added {created} ({})", date::age(created, today));
-        match self {
-            Self::Unknown => "date unknown (no token_created in the config)".to_owned(),
-            Self::Good { created, expires } => {
-                format!("{}, good until about {expires}", added(created))
-            }
-            Self::Renew { created, expires } => {
-                format!("{}, expires around {expires}", added(created))
-            }
-            Self::Expired { created, expires } => {
-                format!("{}, probably expired around {expires}", added(created))
-            }
-        }
-    }
-}
-
-/// How to get a new token for `name`.
-pub fn renew_hint(name: &str) -> String {
-    format!(
-        "hint: run `claude setup-token` and sign in with the account for {name}, then `cam add {name} --force`"
-    )
-}
-
 // --- checks ---
 
 /// The real `claude`, as `exec` would find it.
@@ -250,46 +187,158 @@ pub fn config(path: &Path, exists: bool, loaded: &Result<Config, Error>) -> Chec
         1 => "1 account".to_owned(),
         count => format!("{count} accounts"),
     };
-    let default = match config.default_selection() {
-        Some(selection) => format!("default {selection}"),
-        None => "no default".to_owned(),
-    };
-    Check::new(Status::Ok, format!("config: {shown}, {count}, {default}"))
+    Check::new(Status::Ok, format!("config: {shown}, {count}"))
 }
 
-/// One configured account: is its token stored, and how old is it?
-pub fn account(
-    name: &str,
-    account: &Account,
-    stored: Result<bool, Error>,
-    location: &str,
-    today: Date,
-) -> Check {
-    let subject = format!("account {name}");
-    match stored {
-        Err(err) => return Check::new(Status::Fail, format!("{subject}: {}", explain(&err))),
-        Ok(false) => {
-            return Check::new(
-                Status::Fail,
-                format!("{subject}: no token in {location}\nhint: add one with `cam add {name}`"),
-            );
-        }
-        Ok(true) => {}
+/// What asking Claude Code about a login gave.
+pub enum Login {
+    Checked(Result<auth::Status, Error>),
+    /// There's no `claude` to ask; the `claude` check reports that.
+    NoClaude,
+}
+
+/// "logged in as you@company.com (Acme, team), login expires ...", and
+/// how the expiry stands.
+fn logged_in(status: &auth::Status, today: Date) -> (String, Expiry) {
+    let expiry = auth::expiry(status, today);
+    let mut line = format!("logged in as {}", status.identity());
+    if let Some(expires) = expiry.describe(today) {
+        line.push_str(&format!(", login {expires}"));
     }
-    let age = token_age(
-        account.token_created.and_then(|created| created.date),
-        today,
-    );
-    let line = format!("{subject}: token stored, {}", age.describe(today));
-    let hint = renew_hint(name);
-    match age {
-        TokenAge::Good { .. } => Check::new(Status::Ok, line),
-        TokenAge::Unknown => Check::new(
+    (line, expiry)
+}
+
+/// Who Claude Code's own setup is logged in as. Not being logged in is
+/// fine: someone may use only cam accounts.
+pub fn system(login: &Login, today: Date) -> Check {
+    let hint = format!("hint: run `cam login {SYSTEM}` to renew it");
+    match login {
+        Login::NoClaude => Check::new(
             Status::Info,
-            format!("{line}, so cam can't warn before it expires"),
+            "system: login not checked, since `claude` wasn't found",
         ),
-        TokenAge::Renew { .. } => Check::new(Status::Warn, format!("{line}\n{hint}")),
-        TokenAge::Expired { .. } => Check::new(Status::Fail, format!("{line}\n{hint}")),
+        Login::Checked(Err(err)) => Check::new(
+            Status::Warn,
+            format!("system: cannot check the login: {}", explain(err)),
+        ),
+        Login::Checked(Ok(status)) if status.is_login() => {
+            let (line, expiry) = logged_in(status, today);
+            match expiry {
+                Expiry::Good(_) | Expiry::Unknown => {
+                    Check::new(Status::Ok, format!("system: {line}"))
+                }
+                Expiry::Soon(_) | Expiry::Expired(_) => {
+                    Check::new(Status::Warn, format!("system: {line}\n{hint}"))
+                }
+            }
+        }
+        Login::Checked(Ok(status)) => match status.other_method() {
+            Some(method) => Check::new(
+                Status::Warn,
+                format!("system: Claude Code uses {method} instead of a login"),
+            ),
+            None => Check::new(
+                Status::Info,
+                format!(
+                    "system: Claude Code's own setup isn't logged in\nhint: run `cam login {SYSTEM}` if you use it"
+                ),
+            ),
+        },
+    }
+}
+
+/// One configured account: its dir, and its login.
+pub fn account(name: &str, dir: &Path, dir_exists: bool, login: &Login, today: Date) -> Check {
+    let subject = format!("account {name}");
+    let login_hint = format!("hint: run `cam login {name}`");
+    if !dir_exists {
+        return Check::new(
+            Status::Fail,
+            format!(
+                "{subject}: no dir at {}\nhint: set it up again with `cam add {name}`",
+                dir.display()
+            ),
+        );
+    }
+    match login {
+        Login::NoClaude => Check::new(
+            Status::Info,
+            format!("{subject}: login not checked, since `claude` wasn't found"),
+        ),
+        Login::Checked(Err(err)) => Check::new(
+            Status::Fail,
+            format!("{subject}: cannot check the login: {}", explain(err)),
+        ),
+        Login::Checked(Ok(status)) if status.is_login() => {
+            let (line, expiry) = logged_in(status, today);
+            match expiry {
+                Expiry::Good(_) | Expiry::Unknown => {
+                    Check::new(Status::Ok, format!("{subject}: {line}"))
+                }
+                Expiry::Soon(_) => Check::new(
+                    Status::Warn,
+                    format!("{subject}: {line}\n{login_hint} to renew it"),
+                ),
+                Expiry::Expired(_) => {
+                    Check::new(Status::Fail, format!("{subject}: {line}\n{login_hint}"))
+                }
+            }
+        }
+        Login::Checked(Ok(status)) => match status.other_method() {
+            Some(method) => Check::new(
+                Status::Warn,
+                format!("{subject}: Claude Code uses {method} instead of the account's login"),
+            ),
+            None => Check::new(
+                Status::Fail,
+                format!("{subject}: not logged in\n{login_hint}"),
+            ),
+        },
+    }
+}
+
+/// Accounts (and `system`) logged in as the same email. `emails` holds
+/// (name, email) pairs.
+pub fn same_account(emails: &[(String, String)]) -> Vec<Check> {
+    let mut by_email: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for (name, email) in emails {
+        by_email
+            .entry(email.to_lowercase())
+            .or_default()
+            .push(name.as_str());
+    }
+    by_email
+        .into_iter()
+        .filter(|(_, names)| names.len() > 1)
+        .map(|(email, names)| {
+            let fix = names
+                .iter()
+                .find(|name| **name != SYSTEM)
+                .copied()
+                .unwrap_or("<name>");
+            let verb = if names.len() == 2 {
+                "are both"
+            } else {
+                "are all"
+            };
+            Check::new(
+                Status::Warn,
+                format!(
+                    "same account: {} {verb} logged in as {email}\n\
+                     hint: sign the browser in to the right claude.ai account, then run `cam login {fix}`",
+                    and_list(&names)
+                ),
+            )
+        })
+        .collect()
+}
+
+/// "a and b", "a, b and c".
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -301,7 +350,7 @@ pub fn here(resolved: Result<Resolution, Error>) -> Check {
     }
 }
 
-/// Variables in this shell that would beat cam's token or leak it.
+/// Variables in this shell that would beat the login, or move `system`.
 pub fn environment(get: impl Fn(&str) -> Option<OsString>) -> Vec<Check> {
     let set = |var: &str| get(var).filter(|value| !value.is_empty());
     let mut checks: Vec<Check> = conflict::in_env(&get)
@@ -317,27 +366,20 @@ pub fn environment(get: impl Fn(&str) -> Option<OsString>) -> Vec<Check> {
             )
         })
         .collect();
-    match (set(ENV_ACTIVE), set(ENV_TOKEN)) {
-        (Some(name), Some(_)) => checks.push(Check::new(
-            Status::Warn,
-            format!(
-                "environment: this shell is inside a `claude` that cam started as {}, and that session's token is visible here\n\
-                 hint: any program run from the session can read it; see CLAUDE_CODE_SUBPROCESS_ENV_SCRUB in Claude Code's docs",
-                name.to_string_lossy()
-            ),
-        )),
-        (Some(name), None) => checks.push(Check::new(
+    match (set(ENV_ACTIVE), set(ENV_CONFIG_DIR)) {
+        (Some(name), _) => checks.push(Check::new(
             Status::Ok,
             format!(
-                "environment: inside a `claude` that cam started as {}; its token isn't visible to this shell",
+                "environment: inside a `claude` that cam started as {}",
                 name.to_string_lossy()
             ),
         )),
-        (None, Some(_)) => checks.push(Check::new(
+        (None, Some(dir)) => checks.push(Check::new(
             Status::Warn,
             format!(
-                "environment: {ENV_TOKEN} is exported in this shell, so every program started here can read it, and pass-through folders use it instead of your /login\n\
-                 hint: unset it and let cam pass tokens to `claude`"
+                "environment: {ENV_CONFIG_DIR} is exported as {}, so `system` uses that instead of ~/.claude\n\
+                 hint: unset it, unless you keep Claude Code's own setup there",
+                PathBuf::from(dir).display()
             ),
         )),
         (None, None) => {}
@@ -345,13 +387,13 @@ pub fn environment(get: impl Fn(&str) -> Option<OsString>) -> Vec<Check> {
     if checks.is_empty() {
         checks.push(Check::new(
             Status::Ok,
-            "environment: nothing outranks cam's tokens",
+            "environment: nothing outranks the login",
         ));
     }
     checks
 }
 
-/// What Claude Code's settings files would do to cam's token.
+/// What Claude Code's settings files would do to the login.
 pub fn settings(inspected: &[(File, Inspection)]) -> Vec<Check> {
     let mut checks = Vec::new();
     let mut read = 0;
@@ -390,7 +432,7 @@ pub fn settings(inspected: &[(File, Inspection)]) -> Vec<Check> {
         };
         checks.push(Check::new(
             Status::Ok,
-            format!("settings: nothing outranks cam's tokens ({files})"),
+            format!("settings: nothing outranks the login ({files})"),
         ));
     }
     checks
@@ -400,22 +442,16 @@ pub fn settings(inspected: &[(File, Inspection)]) -> Vec<Check> {
 mod tests {
     use std::collections::HashMap;
 
-    use toml::value::Datetime;
-
     use super::*;
     use crate::account::Selection;
     use crate::conflict::Conflict;
     use crate::resolve::Origin;
     use crate::settings::Scope;
 
-    fn day(year: u16, month: u8, day: u8) -> Date {
-        Date { year, month, day }
-    }
-
     const TODAY: Date = Date {
         year: 2026,
         month: 11,
-        day: 14,
+        day: 15,
     };
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
@@ -428,6 +464,22 @@ mod tests {
 
     fn statuses(checks: &[Check]) -> Vec<Status> {
         checks.iter().map(|check| check.status).collect()
+    }
+
+    fn login(expires: &str) -> Login {
+        Login::Checked(Ok(auth::Status {
+            logged_in: true,
+            auth_method: Some(auth::CLAUDE_AI.to_owned()),
+            email: Some("you@company.com".to_owned()),
+            org_name: Some("Acme".to_owned()),
+            subscription_type: Some("team".to_owned()),
+            login_expires_at: Some(format!("{expires}T12:00:00.000Z")),
+            ..auth::Status::default()
+        }))
+    }
+
+    fn logged_out() -> Login {
+        Login::Checked(Ok(auth::Status::default()))
     }
 
     #[test]
@@ -456,97 +508,113 @@ mod tests {
     }
 
     #[test]
-    fn token_age_thresholds() {
-        let created = day(2025, 11, 14);
-        let expires = day(2026, 11, 14);
-        let at = |today| token_age(Some(created), today);
-        assert_eq!(at(day(2025, 11, 14)), TokenAge::Good { created, expires });
-        // 329 days old: still good. 330: time to renew.
-        assert_eq!(at(day(2026, 10, 9)), TokenAge::Good { created, expires });
-        assert_eq!(at(day(2026, 10, 10)), TokenAge::Renew { created, expires });
-        // The last day of its year, then the day after.
-        assert_eq!(at(day(2026, 11, 14)), TokenAge::Renew { created, expires });
-        assert_eq!(
-            at(day(2026, 11, 15)),
-            TokenAge::Expired { created, expires }
-        );
-        assert_eq!(token_age(None, TODAY), TokenAge::Unknown);
-        // A date in the future (a hand edit, or a clock change) is fine.
-        assert!(matches!(
-            token_age(Some(day(2027, 1, 1)), TODAY),
-            TokenAge::Good { .. }
-        ));
-    }
-
-    #[test]
-    fn token_age_descriptions() {
-        let created = day(2026, 11, 11);
-        assert_eq!(
-            token_age(Some(created), TODAY).describe(TODAY),
-            "added 2026-11-11 (3 days ago), good until about 2027-11-11"
-        );
-        assert_eq!(
-            token_age(Some(day(2025, 12, 1)), TODAY).describe(TODAY),
-            "added 2025-12-01 (348 days ago), expires around 2026-12-01"
-        );
-        assert_eq!(
-            token_age(Some(day(2025, 1, 1)), TODAY).describe(TODAY),
-            "added 2025-01-01 (682 days ago), probably expired around 2026-01-01"
-        );
-    }
-
-    #[test]
-    fn renew_hint_names_the_account() {
-        assert_eq!(
-            renew_hint("work"),
-            "hint: run `claude setup-token` and sign in with the account for work, then `cam add work --force`"
-        );
-    }
-
-    fn account_with(created: Option<Date>) -> Account {
-        Account {
-            token_created: created.map(|date| Datetime {
-                date: Some(date),
-                time: None,
-                offset: None,
-            }),
-        }
-    }
-
-    #[test]
     fn account_checks() {
-        let check = |created, stored| {
-            account(
-                "work",
-                &account_with(created),
-                stored,
-                "the macOS Keychain",
-                TODAY,
-            )
-        };
-        let good = check(Some(day(2026, 11, 11)), Ok(true));
+        let dir = Path::new("/h/.local/share/cam/accounts/work");
+        let check = |exists, login: &Login| account("work", dir, exists, login, TODAY);
+
+        let good = check(true, &login("2026-12-13"));
         assert_eq!(good.status, Status::Ok);
         assert_eq!(
             good.message,
-            "account work: token stored, added 2026-11-11 (3 days ago), good until about 2027-11-11"
+            "account work: logged in as you@company.com (Acme, team), login expires 2026-12-13 (in 28 days)"
         );
 
-        let missing = check(Some(day(2026, 11, 11)), Ok(false));
-        assert_eq!(missing.status, Status::Fail);
+        let soon = check(true, &login("2026-11-17"));
+        assert_eq!(soon.status, Status::Warn);
+        assert!(
+            soon.message
+                .ends_with("in 2 days)\nhint: run `cam login work` to renew it"),
+            "{}",
+            soon.message
+        );
+
+        let expired = check(true, &login("2026-11-10"));
+        assert_eq!(expired.status, Status::Fail);
+        assert!(
+            expired
+                .message
+                .contains("login expired 2026-11-10 (5 days ago)"),
+            "{}",
+            expired.message
+        );
+
+        let out = check(true, &logged_out());
         assert_eq!(
-            missing.message,
-            "account work: no token in the macOS Keychain\nhint: add one with `cam add work`"
+            out,
+            Check::new(
+                Status::Fail,
+                "account work: not logged in\nhint: run `cam login work`"
+            )
         );
 
-        let old = check(Some(day(2025, 12, 1)), Ok(true));
-        assert_eq!(old.status, Status::Warn);
-        assert!(old.message.ends_with("--force`"), "{}", old.message);
+        let no_dir = check(false, &login("2026-12-13"));
+        assert_eq!(no_dir.status, Status::Fail);
+        assert_eq!(
+            no_dir.message,
+            "account work: no dir at /h/.local/share/cam/accounts/work\nhint: set it up again with `cam add work`"
+        );
 
-        assert_eq!(check(Some(day(2025, 1, 1)), Ok(true)).status, Status::Fail);
-        assert_eq!(check(None, Ok(true)).status, Status::Info);
-
-        let broken = check(None, Err(Error::ClaudeNotFound));
+        assert_eq!(check(true, &Login::NoClaude).status, Status::Info);
+        let broken = check(
+            true,
+            &Login::Checked(Err(Error::AuthStatus {
+                status: "exit status 2".to_owned(),
+            })),
+        );
         assert_eq!(broken.status, Status::Fail);
+
+        let key = Login::Checked(Ok(auth::Status {
+            logged_in: true,
+            auth_method: Some("api_key".to_owned()),
+            api_key_source: Some("apiKeyHelper".to_owned()),
+            ..auth::Status::default()
+        }));
+        let key = check(true, &key);
+        assert_eq!(key.status, Status::Warn);
+        assert!(key.message.contains("uses apiKeyHelper"), "{}", key.message);
+    }
+
+    #[test]
+    fn system_checks() {
+        let good = system(&login("2026-12-13"), TODAY);
+        assert_eq!(good.status, Status::Ok);
+        assert!(
+            good.message
+                .starts_with("system: logged in as you@company.com")
+        );
+        // Not logged in, or about to expire, isn't a problem for cam.
+        assert_eq!(system(&logged_out(), TODAY).status, Status::Info);
+        assert_eq!(system(&login("2026-11-10"), TODAY).status, Status::Warn);
+        assert_eq!(system(&Login::NoClaude, TODAY).status, Status::Info);
+    }
+
+    #[test]
+    fn same_account_checks() {
+        let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(name, email)| ((*name).to_owned(), (*email).to_owned()))
+                .collect()
+        };
+        assert!(same_account(&pairs(&[("system", "a@x.org"), ("work", "b@y.com")])).is_empty());
+        let both = same_account(&pairs(&[("system", "a@x.org"), ("work", "A@x.org")]));
+        assert_eq!(statuses(&both), [Status::Warn]);
+        assert_eq!(
+            both[0].message,
+            "same account: system and work are both logged in as a@x.org\n\
+             hint: sign the browser in to the right claude.ai account, then run `cam login work`"
+        );
+        let three = same_account(&pairs(&[
+            ("system", "a@x.org"),
+            ("personal", "a@x.org"),
+            ("work", "a@x.org"),
+        ]));
+        assert!(
+            three[0]
+                .message
+                .starts_with("same account: system, personal and work are all logged in"),
+            "{}",
+            three[0].message
+        );
     }
 
     #[test]
@@ -582,40 +650,42 @@ mod tests {
 
     #[test]
     fn environment_checks() {
-        let clean = environment(env(&[]));
         assert_eq!(
-            clean,
+            environment(env(&[])),
             [Check::new(
                 Status::Ok,
-                "environment: nothing outranks cam's tokens"
+                "environment: nothing outranks the login"
             )]
         );
 
         let conflicts = environment(env(&[
             ("ANTHROPIC_API_KEY", "SECRET-VALUE"),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "SECRET-VALUE"),
             ("CLAUDE_CODE_USE_BEDROCK", "1"),
         ]));
-        assert_eq!(statuses(&conflicts), [Status::Warn, Status::Warn]);
+        assert_eq!(
+            statuses(&conflicts),
+            [Status::Warn, Status::Warn, Status::Warn]
+        );
         assert!(conflicts[0].message.contains("uses Amazon Bedrock"));
-
-        // Inside a cam session: fine if the token stayed out of the shell.
-        let hidden = environment(env(&[("CAM_ACTIVE_ACCOUNT", "work")]));
-        assert_eq!(statuses(&hidden), [Status::Ok]);
-        assert!(hidden[0].message.contains("started as work"));
-        let visible = environment(env(&[
-            ("CAM_ACTIVE_ACCOUNT", "work"),
-            ("CLAUDE_CODE_OAUTH_TOKEN", "SECRET-VALUE"),
-        ]));
-        assert_eq!(statuses(&visible), [Status::Warn]);
-
-        // A token the user exported themselves.
-        let exported = environment(env(&[("CLAUDE_CODE_OAUTH_TOKEN", "SECRET-VALUE")]));
-        assert_eq!(statuses(&exported), [Status::Warn]);
-        assert!(exported[0].message.contains("is exported"));
-        // Values are never shown.
-        for check in conflicts.iter().chain(&visible).chain(&exported) {
+        for check in &conflicts {
             assert!(!check.message.contains("SECRET"), "{}", check.message);
         }
+
+        let session = environment(env(&[
+            ("CAM_ACTIVE_ACCOUNT", "work"),
+            ("CLAUDE_CONFIG_DIR", "/h/.local/share/cam/accounts/work"),
+        ]));
+        assert_eq!(statuses(&session), [Status::Ok]);
+        assert!(session[0].message.contains("started as work"));
+
+        let exported = environment(env(&[("CLAUDE_CONFIG_DIR", "/elsewhere")]));
+        assert_eq!(statuses(&exported), [Status::Warn]);
+        assert!(
+            exported[0].message.contains("exported as /elsewhere"),
+            "{}",
+            exported[0].message
+        );
     }
 
     #[test]
@@ -627,7 +697,10 @@ mod tests {
         let checks = settings(&[
             (
                 file("/h/.claude/settings.json", Scope::User),
-                Inspection::Read(vec![Conflict::ApiKeyHelper, Conflict::Token]),
+                Inspection::Read(vec![
+                    Conflict::ApiKeyHelper,
+                    Conflict::Credential("CLAUDE_CODE_OAUTH_TOKEN"),
+                ]),
             ),
             (
                 file("/w/.claude/settings.json", Scope::Project),
@@ -642,8 +715,8 @@ mod tests {
         assert_eq!(
             messages,
             [
-                "settings: /h/.claude/settings.json sets apiKeyHelper, so Claude Code uses its key instead of cam's token or your /login",
-                "settings: /h/.claude/settings.json sets CLAUDE_CODE_OAUTH_TOKEN in `env`, so it replaces the token cam passes",
+                "settings: /h/.claude/settings.json sets apiKeyHelper, so Claude Code uses its key instead of the login",
+                "settings: /h/.claude/settings.json sets CLAUDE_CODE_OAUTH_TOKEN in `env`, so Claude Code uses it instead of the login",
                 "settings: cannot check /w/.claude/settings.local.json: not valid JSON (x)",
             ]
         );
@@ -666,12 +739,12 @@ mod tests {
             clean,
             [Check::new(
                 Status::Ok,
-                "settings: nothing outranks cam's tokens (1 file checked)"
+                "settings: nothing outranks the login (1 file checked)"
             )]
         );
         assert_eq!(
             settings(&[])[0].message,
-            "settings: nothing outranks cam's tokens (no settings files found)"
+            "settings: nothing outranks the login (no settings files found)"
         );
     }
 }

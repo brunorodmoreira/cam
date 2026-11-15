@@ -8,11 +8,6 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/brunorodmoreira/cam"
 publish = false
 
-[features]
-# Compiles in the file-based test store selected by CAM_TEST_STORE. Only for tests:
-# `cargo test` turns it on through the self dev-dependency below.
-test-store = []
-
 [[bin]]
 name = "cam"
 path = "src/main.rs"
@@ -22,7 +17,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "string"] }
 clap_complete = "4.6.11"
 dirs = "7.0.0"
-rpassword = "7.5.5"
+libc = "0.2.191"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
@@ -30,12 +25,6 @@ toml = "1.2.1"
 toml_edit = "0.25.19"
 
 [dev-dependencies]
-# Self-reference so `cargo test` builds the binary with the test store; normal,
-# release and `cargo install` builds don't get it.
-cam-cli = { path = ".", features = ["test-store"] }
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 tempfile = "3.27.0"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3.7.0"

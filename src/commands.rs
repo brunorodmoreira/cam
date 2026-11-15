@@ -2,31 +2,30 @@
 
 use std::convert::Infallible;
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::fs;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use anyhow::{Context, Result, anyhow, ensure};
-use toml::value::Date;
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
-use crate::account::Selection;
+use crate::account::{self, SYSTEM, Selection};
+use crate::auth::{self, Expiry};
 use crate::config::{self, Config};
 use crate::conflict;
 use crate::date;
 use crate::discover::{self, ENV_CLAUDE_BIN, Search};
-use crate::doctor::{self, TokenAge};
+use crate::doctor::{self, Login};
 use crate::error::Error;
-use crate::launch::{self, Credential, ENV_ACTIVE, ENV_DEPTH, ENV_TOKEN};
+use crate::launch::{self, ENV_ACTIVE, ENV_CONFIG_DIR, ENV_DEPTH, Target};
 use crate::marker::{self, FILE_NAME};
 use crate::redact::redact;
 use crate::resolve;
 use crate::settings;
 use crate::shim::{self, Installed};
-use crate::store::{self, SecretStore};
-use crate::token::Token;
 
 /// Prints a line to stdout, redacted like everything else cam prints.
 fn say(line: impl Display) {
@@ -43,125 +42,301 @@ fn warn(line: impl Display) {
     eprintln!("warning: {}", redact(&line.to_string()));
 }
 
-/// A name `add` and `remove` accept: valid, and not `none`.
+/// A name `add` and `remove` accept: valid, and not `system`.
 fn account_name(name: &str) -> Result<String, Error> {
     match Selection::parse(name) {
         Some(Selection::Account(name)) => Ok(name),
-        Some(Selection::PassThrough) => Err(Error::ReservedName),
+        Some(Selection::System) => Err(Error::ReservedName),
         None => Err(Error::InvalidNameArg {
             name: name.to_owned(),
         }),
     }
 }
 
-/// `cam add`: stores the token, then records the account in the config.
-/// If the config write fails, a newly stored token is deleted again.
-pub fn add(
-    name: &str,
-    force: bool,
-    config_path: &Path,
-    store: &dyn SecretStore,
-    read_token: impl FnOnce(&str) -> Result<Token, Error>,
-) -> Result<()> {
-    let name = account_name(name)?;
-    // A broken config fails here, before the token prompt.
-    Config::load(config_path)?;
-    let had_token = store.contains(&name)?;
-    if had_token && !force {
-        return Err(Error::TokenExists {
-            name,
-            location: store.location(),
+fn home() -> Result<PathBuf, Error> {
+    dirs::home_dir().ok_or(Error::NoHome)
+}
+
+/// A variable that is set and non-empty.
+fn env_set(key: &str) -> Option<OsString> {
+    env::var_os(key).filter(|value| !value.is_empty())
+}
+
+/// A `CLAUDE_CONFIG_DIR` the user exported, which moves `system`'s setup.
+/// Inside a cam session the variable is that session's account, not theirs.
+fn user_config_dir() -> Option<PathBuf> {
+    env_set(ENV_ACTIVE)
+        .is_none()
+        .then(|| env_set(ENV_CONFIG_DIR).map(PathBuf::from))
+        .flatten()
+}
+
+/// The `CAM_SHIM_DEPTH` to give `claude`.
+fn depth() -> Result<u32, Error> {
+    launch::child_depth(env::var_os(ENV_DEPTH).as_deref())
+}
+
+/// `claude` with `args`, in the environment `exec` would give it.
+fn claude(program: &Path, args: &[impl AsRef<OsStr>], target: Target<'_>, depth: u32) -> Command {
+    let inherited_active = env::var_os(ENV_ACTIVE).is_some();
+    launch::command(program, args, target, inherited_active, depth)
+}
+
+/// What Claude Code says about the login itself: `claude auth status` with
+/// whatever would outrank the login left out.
+fn login_status(program: &Path, target: Target<'_>, depth: u32) -> Result<auth::Status, Error> {
+    let mut command = claude(program, &["auth", "status", "--json"], target, depth);
+    launch::without_outranking(&mut command);
+    auth::status(command, program)
+}
+
+/// Runs Claude Code's login for `target`, then checks with Claude Code
+/// that it worked.
+fn log_in(program: &Path, target: Target<'_>, depth: u32) -> Result<auth::Status> {
+    let exit = auth::login(claude(program, &["auth", "login"], target, depth), program)?;
+    if !exit.success() {
+        return Err(Error::LoginFailed {
+            status: auth::describe_exit(exit),
         }
         .into());
     }
-    let token = read_token(&name)?;
-    store.set(&name, &token)?;
-    if let Err(err) = config::add_account(config_path, &name, date::today()) {
-        if !had_token {
-            // Best effort: don't leave a token behind that the config doesn't know.
-            let _ = store.delete(&name);
-        }
-        return Err(err.into());
+    let status = login_status(program, target, depth)?;
+    if !status.is_login() {
+        bail!("Claude Code reports no login after `claude auth login`");
     }
-    let verb = if had_token { "replaced" } else { "added" };
-    say(format_args!(
-        "{verb} {name}: token saved in {}",
-        store.location()
-    ));
-    Ok(())
+    Ok(status)
 }
 
-/// `cam remove`: deletes the token first, so a store failure leaves the
-/// config untouched, then the config entry.
-pub fn remove(name: &str, config_path: &Path, store: &dyn SecretStore) -> Result<()> {
-    let name = account_name(name)?;
-    // A broken config fails here, before anything is deleted.
-    Config::load(config_path)?;
-    let had_token = store.delete(&name)?;
-    let removed = config::remove_account(config_path, &name)?;
-    let location = store.location();
-    match (removed.existed, had_token) {
-        (false, false) => return Err(Error::NothingToRemove { name }.into()),
-        (true, true) => say(format_args!(
-            "removed {name}: config entry and token in {location}"
-        )),
-        (true, false) => say(format_args!(
-            "removed {name}: config entry (no token was stored)"
-        )),
-        (false, true) => say(format_args!(
-            "removed {name}: token in {location} (it had no config entry)"
-        )),
+/// The emails Claude Code last recorded for `system` and each account, as
+/// (name, email). Read from `.claude.json` files, so nothing runs.
+fn recorded_emails(config: &Config, home: &Path) -> Vec<(String, String)> {
+    let system = auth::recorded_email(&auth::claude_json(user_config_dir().as_deref(), home))
+        .map(|email| (SYSTEM.to_owned(), email));
+    let accounts = config.accounts().keys().filter_map(|name| {
+        let dir = account::dir(home, name);
+        auth::recorded_email(&auth::claude_json(Some(&dir), home))
+            .map(|email| (name.clone(), email))
+    });
+    system.into_iter().chain(accounts).collect()
+}
+
+/// Warns when `name` just logged in as an email another account (or
+/// `system`) already uses: the browser was probably signed in to the
+/// wrong claude.ai account.
+fn warn_same_account(name: &str, status: &auth::Status, config: &Config, home: &Path) {
+    let Some(email) = &status.email else {
+        return;
+    };
+    for (other, other_email) in recorded_emails(config, home) {
+        if other != name && other_email.eq_ignore_ascii_case(email) {
+            warn(format_args!(
+                "{name} is logged in as {email}, the same as {other}; the browser may have been signed in to the wrong claude.ai account\n\
+                 hint: sign it in to the right one, then run `cam login {name}`"
+            ));
+        }
     }
-    if removed.was_default {
-        note(format_args!(
-            "{name} was the default, so `default` is now unset"
+}
+
+/// Warns about each variable set in this shell that outranks a login.
+fn warn_outranking(name: &str) {
+    for var in launch::outranking(|key| env::var_os(key)) {
+        warn(format_args!(
+            "{var} is set and outranks the login of \"{name}\"; unset it to use that account"
         ));
     }
+}
+
+/// `cam add`: creates the account dir, runs Claude Code's login in it, and
+/// records the account once Claude Code confirms the login. If anything
+/// fails, it logs out and deletes the dir, so a retry starts clean.
+pub fn add(name: &str, config_path: &Path) -> Result<()> {
+    let name = account_name(name)?;
+    // A broken config fails here, before anything is created.
+    let config = Config::load(config_path)?;
+    let home = home()?;
+    let dir = account::dir(&home, &name);
+    if account::exists(&dir) {
+        return Err(Error::AccountExists { name, dir }.into());
+    }
+    let depth = depth()?;
+    let program = real_claude(&own_exe()?)?;
+    account::create_dir(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let target = Target::Account {
+        name: &name,
+        dir: &dir,
+    };
+    let added = log_in(&program, target, depth).and_then(|status| {
+        config::add_account(config_path, &name)?;
+        Ok(status)
+    });
+    match added {
+        Ok(status) => {
+            say(format_args!(
+                "added {name}: logged in as {}",
+                status.identity()
+            ));
+            warn_same_account(&name, &status, &config, &home);
+            warn_outranking(&name);
+            Ok(())
+        }
+        Err(err) => {
+            // Best effort: leave nothing behind.
+            let logout = claude(&program, &["auth", "logout"], target, depth);
+            let _ = auth::logout(logout, &program);
+            let _ = fs::remove_dir_all(&dir);
+            Err(err.context(format!("{name} was not added")))
+        }
+    }
+}
+
+/// `cam login`: runs Claude Code's login again for an account, by default
+/// the one that applies here. Deletes nothing if it fails.
+pub fn login(name: Option<&str>, config_path: &Path) -> Result<()> {
+    let selection = match name {
+        Some(name) => {
+            let selection = Selection::parse(name).ok_or_else(|| Error::InvalidNameArg {
+                name: name.to_owned(),
+            })?;
+            if let Selection::Account(name) = &selection
+                && !Config::load(config_path)?.has_account(name)
+            {
+                return Err(Error::UnknownAccountArg { name: name.clone() }.into());
+            }
+            selection
+        }
+        None => {
+            let env_account = resolve::env_account()?;
+            let resolution =
+                resolve::resolve(env_account.as_deref(), &current_dir()?, config_path)?;
+            say(&resolution);
+            resolution.selection
+        }
+    };
+    let home = home()?;
+    let depth = depth()?;
+    let dir = match &selection {
+        Selection::Account(name) => {
+            let dir = account::dir(&home, name);
+            if !dir.is_dir() {
+                return Err(Error::NoAccountDir {
+                    name: name.clone(),
+                    dir,
+                }
+                .into());
+            }
+            Some(dir)
+        }
+        Selection::System => None,
+    };
+    let program = real_claude(&own_exe()?)?;
+    let target = match (&selection, &dir) {
+        (Selection::Account(name), Some(dir)) => Target::Account { name, dir },
+        _ => Target::System,
+    };
+    let status = log_in(&program, target, depth)?;
+    say(format_args!(
+        "{selection}: logged in as {}",
+        status.identity()
+    ));
+    // The config only matters for the same-account check here.
+    if let Ok(config) = Config::load(config_path) {
+        warn_same_account(&selection.to_string(), &status, &config, &home);
+    }
+    warn_outranking(&selection.to_string());
     Ok(())
 }
 
-/// `cam list`: reads only the config, never the store.
+/// `cam remove`: logs the account out first, and stops if that fails, so
+/// its login is never orphaned. Then deletes its dir without following
+/// links, then its config entry.
+pub fn remove(name: &str, config_path: &Path) -> Result<()> {
+    let name = account_name(name)?;
+    // A broken config fails here, before anything is deleted.
+    let configured = Config::load(config_path)?.has_account(&name);
+    let dir = account::dir(&home()?, &name);
+    let has_dir = account::exists(&dir);
+    if !configured && !has_dir {
+        return Err(Error::NothingToRemove { name }.into());
+    }
+    if has_dir {
+        let logged_out = depth().map_err(anyhow::Error::from).and_then(|depth| {
+            let program = real_claude(&own_exe()?)?;
+            let target = Target::Account {
+                name: &name,
+                dir: &dir,
+            };
+            auth::logout(
+                claude(&program, &["auth", "logout"], target, depth),
+                &program,
+            )?;
+            Ok(())
+        });
+        logged_out.with_context(|| format!("cannot log {name} out, so nothing was removed"))?;
+        fs::remove_dir_all(&dir)
+            .with_context(|| format!("logged {name} out, but cannot delete {}", dir.display()))?;
+    }
+    if configured {
+        config::remove_account(config_path, &name)?;
+    }
+    let shown = dir.display();
+    match (has_dir, configured) {
+        (true, true) => say(format_args!(
+            "removed {name}: logged out, deleted {shown} and its config entry"
+        )),
+        (true, false) => say(format_args!(
+            "removed {name}: logged out and deleted {shown} (it had no config entry)"
+        )),
+        _ => say(format_args!(
+            "removed {name}: its config entry (it had no account dir)"
+        )),
+    }
+    Ok(())
+}
+
+/// `cam list`: reads the config and each `.claude.json`, and never runs
+/// `claude`.
 pub fn list(config_path: &Path) -> Result<()> {
     let config = Config::load(config_path)?;
-    for line in list_lines(&config, date::today()) {
+    let home = home()?;
+    let emails = recorded_emails(&config, &home);
+    let email = |name: &str| {
+        emails
+            .iter()
+            .find(|(other, _)| other == name)
+            .map(|(_, email)| email.clone())
+    };
+    let accounts: Vec<(String, Option<String>)> = config
+        .accounts()
+        .keys()
+        .map(|name| (name.clone(), email(name)))
+        .collect();
+    for line in list_lines(email(SYSTEM), &accounts) {
         say(line);
     }
     Ok(())
 }
 
-fn list_lines(config: &Config, today: Date) -> Vec<String> {
-    if config.accounts().is_empty() {
-        return vec!["no accounts yet; add one with `cam add <name>`".to_owned()];
+fn list_lines(system: Option<String>, accounts: &[(String, Option<String>)]) -> Vec<String> {
+    let mut rows = vec![("ACCOUNT".to_owned(), "EMAIL".to_owned())];
+    rows.push((SYSTEM.to_owned(), system.unwrap_or_else(|| "-".to_owned())));
+    for (name, email) in accounts {
+        rows.push((
+            name.clone(),
+            email.clone().unwrap_or_else(|| "-".to_owned()),
+        ));
     }
-    let default = config.default_selection();
-    let mut rows = vec![["ACCOUNT".to_owned(), "TOKEN ADDED".to_owned()]];
-    for (name, account) in config.accounts() {
-        let is_default = default.as_ref() == Some(&Selection::Account(name.clone()));
-        let added = match account.token_created.and_then(|created| created.date) {
-            Some(created) => format!("{created} ({})", date::age(created, today)),
-            None => "unknown".to_owned(),
-        };
-        rows.push([
-            if is_default {
-                format!("{name} (default)")
-            } else {
-                name.clone()
-            },
-            added,
-        ]);
-    }
-    let name_width = rows
+    let width = rows
         .iter()
-        .map(|[name, _]| name.chars().count())
+        .map(|(name, _)| name.chars().count())
         .max()
         .unwrap_or(0);
     let mut lines: Vec<String> = rows
         .iter()
-        .map(|[name, added]| format!("{name:<name_width$}  {added}"))
+        .map(|(name, email)| format!("{name:<width$}  {email}"))
         .collect();
-    if default == Some(Selection::PassThrough) {
+    if accounts.is_empty() {
         lines.push(String::new());
-        lines.push("default: none (pass-through)".to_owned());
+        lines.push("no accounts yet; add one with `cam add <name>`".to_owned());
     }
     lines
 }
@@ -174,70 +349,68 @@ pub fn which(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A variable that is set and non-empty.
-fn env_set(key: &str) -> Option<OsString> {
-    env::var_os(key).filter(|value| !value.is_empty())
-}
-
-/// `cam whoami`: the account for this folder and its token. It checks that the token is stored without reading it, so it
-/// can't cause a Keychain prompt. Fails when `claude` here would fail for
-/// lack of a token.
+/// `cam whoami`: the account for this folder, and who Claude Code says it
+/// is logged in as. Asks in the environment `claude` would get, so what
+/// outranks the login shows up as what Claude Code would really use.
+/// Fails if the account isn't logged in, or its login has expired.
 pub fn whoami(config_path: &Path) -> Result<()> {
     let env_account = resolve::env_account()?;
     let resolution = resolve::resolve(env_account.as_deref(), &current_dir()?, config_path)?;
     say(&resolution);
+    let depth = depth()?;
+    let dir;
+    let target = match &resolution.selection {
+        Selection::System => Target::System,
+        Selection::Account(name) => {
+            dir = account::dir(&home()?, name);
+            if !dir.is_dir() {
+                return Err(Error::NoAccountDir {
+                    name: name.clone(),
+                    dir,
+                }
+                .into());
+            }
+            Target::Account { name, dir: &dir }
+        }
+    };
+    let program = real_claude(&own_exe()?)?;
+    let command = claude(&program, &["auth", "status", "--json"], target, depth);
+    let status = auth::status(command, &program)?;
+    let name = resolution.selection.to_string();
+    let today = date::today();
+    let mut failed = false;
     // Printed after the report, so they don't land in the middle of it.
     let mut warnings = Vec::new();
-    let mut missing = None;
-    match &resolution.selection {
-        // cam drops a token that a parent cam passed, but leaves one the
-        // user exported (see `exec`), and Claude Code ranks it above /login.
-        Selection::PassThrough if env_set(ENV_TOKEN).is_some() && env_set(ENV_ACTIVE).is_none() => {
-            say(format_args!(
-                "  login:   the {ENV_TOKEN} exported in this shell"
-            ));
+    if status.is_login() {
+        say(format_args!(
+            "  email:   {}",
+            status.email.as_deref().unwrap_or("unknown")
+        ));
+        match (&status.org_name, &status.subscription_type) {
+            (Some(org), Some(plan)) => say(format_args!("  org:     {org} ({plan})")),
+            (Some(org), None) => say(format_args!("  org:     {org}")),
+            (None, Some(plan)) => say(format_args!("  plan:    {plan}")),
+            (None, None) => {}
         }
-        Selection::PassThrough => {
-            say("  login:   Claude Code's own (`claude auth status` shows which)");
+        let expiry = auth::expiry(&status, today);
+        if let Some(expires) = expiry.describe(today) {
+            say(format_args!("  login:   {expires}"));
         }
-        Selection::Account(name) => {
-            let config = Config::load(config_path)?;
-            let account = config
-                .accounts()
-                .get(name)
-                .ok_or_else(|| Error::UnknownAccountArg { name: name.clone() })?;
-            let store = store::open()?;
-            if store.contains(name)? {
-                let today = date::today();
-                let age = doctor::token_age(
-                    account.token_created.and_then(|created| created.date),
-                    today,
-                );
-                say(format_args!(
-                    "  token:   stored in {}, {}",
-                    store.location(),
-                    age.describe(today)
-                ));
-                let problem = match age {
-                    TokenAge::Renew { expires, .. } => Some(format!("expires around {expires}")),
-                    TokenAge::Expired { expires, .. } => {
-                        Some(format!("has probably expired (around {expires})"))
-                    }
-                    TokenAge::Good { .. } | TokenAge::Unknown => None,
-                };
-                if let Some(problem) = problem {
-                    warnings.push(format!(
-                        "the token for \"{name}\" {problem}\n{}",
-                        doctor::renew_hint(name)
-                    ));
-                }
-            } else {
-                missing = Some(Error::NoToken {
-                    name: name.clone(),
-                    location: store.location(),
-                });
-            }
+        match expiry {
+            Expiry::Soon(_) => warnings.push(format!(
+                "the login of \"{name}\" {}\nhint: run `cam login {name}` to renew it",
+                expiry.describe(today).unwrap_or_default()
+            )),
+            Expiry::Expired(_) => failed = true,
+            Expiry::Good(_) | Expiry::Unknown => {}
         }
+    } else if let Some(method) = status.other_method() {
+        say(format_args!(
+            "  login:   {method}, which Claude Code uses instead of a login"
+        ));
+    } else {
+        say("  login:   not logged in");
+        failed = true;
     }
     if let Some(active) = env_set(ENV_ACTIVE) {
         say(format_args!(
@@ -255,20 +428,20 @@ pub fn whoami(config_path: &Path) -> Result<()> {
     for warning in warnings {
         warn(warning);
     }
-    match missing {
-        Some(err) => Err(err.into()),
-        None => Ok(()),
-    }
+    ensure!(!failed, Error::NotLoggedIn { name });
+    Ok(())
 }
 
 /// `cam doctor`: checks cam's setup and what could keep `claude` from using
-/// the account cam picks. Never reads a token, so it can't cause a Keychain
-/// prompt. Fails if any check fails; warnings alone don't.
+/// the account cam picks. Asks Claude Code about each login, and never
+/// reads a credential. Fails if any check fails; warnings alone don't.
 pub fn doctor(config_path: &Path) -> Result<()> {
     let cwd = current_dir()?;
     let home = dirs::home_dir();
     let own_exe = own_exe()?;
-    let mut checks = vec![doctor::claude(real_claude(&own_exe))];
+    let found = real_claude(&own_exe);
+    let program = found.as_ref().ok().cloned();
+    let mut checks = vec![doctor::claude(found)];
 
     let path = env::var_os("PATH");
     let shim_dir = shim::default_dir(home.clone());
@@ -283,41 +456,65 @@ pub fn doctor(config_path: &Path) -> Result<()> {
     let exists = config_path.try_exists().unwrap_or(true);
     let loaded = Config::load(config_path);
     checks.push(doctor::config(config_path, exists, &loaded));
-    if let Ok(config) = &loaded
-        && !config.accounts().is_empty()
-    {
-        match store::open() {
-            Err(err) => checks.push(doctor::Check::new(
-                doctor::Status::Fail,
-                format!("tokens: {err:#}"),
-            )),
-            Ok(store) => {
-                let today = date::today();
-                for (name, account) in config.accounts() {
-                    checks.push(doctor::account(
-                        name,
-                        account,
-                        store.contains(name),
-                        &store.location(),
-                        today,
-                    ));
-                }
-            }
+
+    // A depth that is already too deep only matters to `exec`.
+    let depth = depth().unwrap_or(1);
+    let ask = |target: Target<'_>| match &program {
+        Some(program) => Login::Checked(login_status(program, target, depth)),
+        None => Login::NoClaude,
+    };
+    let today = date::today();
+    let mut emails = Vec::new();
+    let mut note_email = |name: &str, login: &Login| {
+        if let Login::Checked(Ok(status)) = login
+            && status.is_login()
+            && let Some(email) = &status.email
+        {
+            emails.push((name.to_owned(), email.clone()));
+        }
+    };
+    let system = ask(Target::System);
+    note_email(SYSTEM, &system);
+    checks.push(doctor::system(&system, today));
+    if let (Ok(config), Some(home)) = (&loaded, &home) {
+        for name in config.accounts().keys() {
+            let dir = account::dir(home, name);
+            let dir_exists = dir.is_dir();
+            let login = if dir_exists {
+                ask(Target::Account { name, dir: &dir })
+            } else {
+                Login::NoClaude
+            };
+            note_email(name, &login);
+            checks.push(doctor::account(name, &dir, dir_exists, &login, today));
         }
     }
+    checks.extend(doctor::same_account(&emails));
 
-    checks.push(doctor::here(resolve::env_account().and_then(|account| {
-        resolve::resolve(account.as_deref(), &cwd, config_path)
-    })));
+    let resolved = resolve::env_account()
+        .and_then(|account| resolve::resolve(account.as_deref(), &cwd, config_path));
+    // The user settings Claude Code would read here: the account's own,
+    // or `system`'s.
+    let config_dir = match (&resolved, &home) {
+        (Ok(resolution), Some(home)) => match &resolution.selection {
+            Selection::Account(name) => Some(account::dir(home, name)),
+            Selection::System => user_config_dir(),
+        },
+        _ => user_config_dir(),
+    };
+    checks.push(doctor::here(resolved));
     checks.extend(doctor::environment(|key| env::var_os(key)));
-    let config_dir = env::var_os(settings::ENV_CONFIG_DIR);
-    let inspected: Vec<_> = settings::files(config_dir.as_deref(), home.as_deref(), &cwd)
-        .into_iter()
-        .map(|file| {
-            let inspection = settings::inspect(&file);
-            (file, inspection)
-        })
-        .collect();
+    let inspected: Vec<_> = settings::files(
+        config_dir.as_deref().map(Path::as_os_str),
+        home.as_deref(),
+        &cwd,
+    )
+    .into_iter()
+    .map(|file| {
+        let inspection = settings::inspect(&file);
+        (file, inspection)
+    })
+    .collect();
     checks.extend(doctor::settings(&inspected));
 
     for check in &checks {
@@ -333,37 +530,32 @@ pub fn doctor(config_path: &Path) -> Result<()> {
 }
 
 /// `cam exec`: resolves the account, then replaces cam with the real
-/// `claude`. Returns only on failure. Pass-through never opens the store, so
-/// it can't trigger a Keychain prompt.
+/// `claude`. Returns only on failure.
 pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
     // First, so a loop stops before doing any work.
-    let depth = launch::child_depth(env::var_os(ENV_DEPTH).as_deref())?;
+    let depth = depth()?;
     let env_account = resolve::env_account()?;
     let resolution = resolve::resolve(env_account.as_deref(), &current_dir()?, config_path)?;
 
     let program = real_claude(&own_exe()?)?;
 
-    let credential = match resolution.selection {
-        Selection::PassThrough => Credential::PassThrough,
+    let dir;
+    let target = match &resolution.selection {
+        Selection::System => Target::System,
         Selection::Account(name) => {
-            let store = store::open()?;
-            let Some(token) = store.get(&name)? else {
-                return Err(Error::NoToken {
-                    name,
-                    location: store.location(),
+            dir = account::dir(&home()?, name);
+            if !dir.is_dir() {
+                return Err(Error::NoAccountDir {
+                    name: name.clone(),
+                    dir,
                 }
                 .into());
-            };
-            for var in launch::outranking(|key| env::var_os(key)) {
-                warn(format_args!(
-                    "{var} is set and outranks the token for \"{name}\"; unset it to use that account"
-                ));
             }
-            Credential::Account { name, token }
+            warn_outranking(name);
+            Target::Account { name, dir: &dir }
         }
     };
-    let inherited_active = env::var_os(ENV_ACTIVE).is_some();
-    let source = launch::command(&program, args, &credential, inherited_active, depth).exec();
+    let source = claude(&program, args, target, depth).exec();
     Err(Error::Exec {
         path: program,
         source,
@@ -516,186 +708,55 @@ fn target_dir(dir: Option<&Path>) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
-    use crate::store::FileStore;
-    use crate::testutil::{Tree, fake_token};
 
-    fn store(tree: &Tree) -> FileStore {
-        FileStore::new(tree.root.join("store"))
-    }
-
-    fn no_prompt(_: &str) -> Result<Token, Error> {
-        panic!("must not prompt for a token")
+    fn accounts(list: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        list.iter()
+            .map(|(name, email)| ((*name).to_owned(), email.map(str::to_owned)))
+            .collect()
     }
 
     #[test]
-    fn add_stores_token_and_records_account() {
-        let tree = Tree::new();
-        let config = tree.root.join("config.toml");
-        let store = store(&tree);
-        add("work", false, &config, &store, |name| {
-            assert_eq!(name, "work");
-            Ok(fake_token(1))
-        })
-        .unwrap();
-        assert!(store.contains("work").unwrap());
-        let loaded = Config::load(&config).unwrap();
-        let account = &loaded.accounts()["work"];
+    fn list_without_accounts_shows_system() {
         assert_eq!(
-            account.token_created.and_then(|created| created.date),
-            Some(date::today())
-        );
-    }
-
-    #[test]
-    fn add_refuses_to_replace_without_force() {
-        let tree = Tree::new();
-        let config = tree.root.join("config.toml");
-        let store = store(&tree);
-        add("work", false, &config, &store, |_| Ok(fake_token(1))).unwrap();
-        let err = add("work", false, &config, &store, no_prompt).unwrap_err();
-        assert!(err.to_string().contains("--force"), "{err}");
-
-        add("work", true, &config, &store, |_| Ok(fake_token(2))).unwrap();
-        let stored = fs::read_to_string(tree.root.join("store/work")).unwrap();
-        assert_eq!(stored, fake_token(2).expose());
-    }
-
-    #[test]
-    fn add_fills_in_a_hand_written_account_without_force() {
-        let tree = Tree::new();
-        let config = tree.config("# mine\n[accounts.work]\n");
-        let store = store(&tree);
-        add("work", false, &config, &store, |_| Ok(fake_token(1))).unwrap();
-        assert!(store.contains("work").unwrap());
-        assert!(fs::read_to_string(&config).unwrap().starts_with("# mine\n"));
-    }
-
-    #[test]
-    fn add_validates_before_prompting() {
-        let tree = Tree::new();
-        let config = tree.root.join("config.toml");
-        let store = store(&tree);
-        for name in ["Work", "none", ""] {
-            assert!(add(name, false, &config, &store, no_prompt).is_err());
-        }
-        let broken = tree.config("not toml");
-        assert!(add("work", false, &broken, &store, no_prompt).is_err());
-        assert!(!store.contains("work").unwrap());
-    }
-
-    #[test]
-    fn add_rolls_back_the_token_if_the_config_cannot_be_written() {
-        let tree = Tree::new();
-        let dir = tree.dir("locked");
-        let config = dir.join("config.toml");
-        fs::write(&config, "").unwrap();
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
-        let store = store(&tree);
-        let result = add("work", false, &config, &store, |_| Ok(fake_token(1)));
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(result.is_err());
-        assert!(!store.contains("work").unwrap());
-    }
-
-    #[test]
-    fn add_with_force_keeps_the_new_token_if_the_config_cannot_be_written() {
-        let tree = Tree::new();
-        let dir = tree.dir("locked");
-        let config = dir.join("config.toml");
-        fs::write(&config, "[accounts.work]\ntoken_created = 2025-01-01\n").unwrap();
-        let store = store(&tree);
-        store.set("work", &fake_token(1)).unwrap();
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
-        // The new date forces a config write, which the locked dir makes fail.
-        let result = add("work", true, &config, &store, |_| Ok(fake_token(2)));
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(result.is_err());
-        assert!(store.contains("work").unwrap());
-    }
-
-    #[test]
-    fn remove_deletes_token_and_entry() {
-        let tree = Tree::new();
-        let config = tree.root.join("config.toml");
-        let store = store(&tree);
-        add("work", false, &config, &store, |_| Ok(fake_token(1))).unwrap();
-        remove("work", &config, &store).unwrap();
-        assert!(!store.contains("work").unwrap());
-        assert!(!Config::load(&config).unwrap().has_account("work"));
-    }
-
-    #[test]
-    fn remove_handles_partial_state() {
-        let tree = Tree::new();
-        let store = store(&tree);
-        // Config entry without a token.
-        let config = tree.config("[accounts.work]\n");
-        remove("work", &config, &store).unwrap();
-        assert!(!Config::load(&config).unwrap().has_account("work"));
-        // A token without a config entry.
-        store.set("work", &fake_token(1)).unwrap();
-        remove("work", &config, &store).unwrap();
-        assert!(!store.contains("work").unwrap());
-        // Neither.
-        let err = remove("work", &config, &store).unwrap_err();
-        assert!(err.to_string().contains("nothing to remove"), "{err}");
-    }
-
-    #[test]
-    fn remove_with_broken_config_deletes_nothing() {
-        let tree = Tree::new();
-        let store = store(&tree);
-        store.set("work", &fake_token(1)).unwrap();
-        let config = tree.config("not toml");
-        assert!(remove("work", &config, &store).is_err());
-        assert!(store.contains("work").unwrap());
-    }
-
-    fn config_from(text: &str) -> Config {
-        let tree = Tree::new();
-        Config::load(&tree.config(text)).unwrap()
-    }
-
-    const TODAY: Date = Date {
-        year: 2026,
-        month: 11,
-        day: 11,
-    };
-
-    #[test]
-    fn list_empty() {
-        assert_eq!(
-            list_lines(&config_from(""), TODAY),
-            ["no accounts yet; add one with `cam add <name>`"]
-        );
-    }
-
-    #[test]
-    fn list_aligns_columns_and_marks_default() {
-        let config = config_from(
-            "default = \"work\"\n\
-             [accounts.work]\ntoken_created = 2026-11-11\n\
-             [accounts.personal]\ntoken_created = 2026-11-02\n\
-             [accounts.old]\n",
-        );
-        assert_eq!(
-            list_lines(&config, TODAY),
+            list_lines(Some("me@home.org".to_owned()), &[]),
             [
-                "ACCOUNT         TOKEN ADDED",
-                "old             unknown",
-                "personal        2026-11-02 (9 days ago)",
-                "work (default)  2026-11-11 (today)",
+                "ACCOUNT  EMAIL",
+                "system   me@home.org",
+                "",
+                "no accounts yet; add one with `cam add <name>`",
             ]
         );
     }
 
     #[test]
-    fn list_shows_pass_through_default() {
-        let config = config_from("default = \"none\"\n[accounts.work]\n");
-        let lines = list_lines(&config, TODAY);
-        assert_eq!(lines.last().unwrap(), "default: none (pass-through)");
+    fn list_aligns_columns() {
+        assert_eq!(
+            list_lines(
+                None,
+                &accounts(&[
+                    ("personal", Some("me@home.org")),
+                    ("work", Some("you@company.com")),
+                    ("x", None),
+                ])
+            ),
+            [
+                "ACCOUNT   EMAIL",
+                "system    -",
+                "personal  me@home.org",
+                "work      you@company.com",
+                "x         -",
+            ]
+        );
+    }
+
+    #[test]
+    fn account_names_exclude_system() {
+        assert_eq!(account_name("work").unwrap(), "work");
+        assert!(matches!(account_name("system"), Err(Error::ReservedName)));
+        assert!(matches!(
+            account_name("Work"),
+            Err(Error::InvalidNameArg { .. })
+        ));
     }
 }
