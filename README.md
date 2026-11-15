@@ -204,7 +204,7 @@ If `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` is set, Claude Code uses 
 
 Nothing, for now. A new account starts with an empty Claude Code setup and goes through Claude Code's first-run screens once. Its settings, plugins, skills, CLAUDE.md, MCP servers, transcripts and memory are its own.
 
-Next, cam will let each account share groups of your setup in `~/.claude`, kept in sync with links: settings (with plugins and hooks), instructions, extensions such as skills and agents, and history. MCP servers stay per account: add them with `CAM_ACCOUNT=work claude mcp add …`. See [DESIGN.md](DESIGN.md#sharing-m8).
+Next, cam will let each account share groups of your setup in `~/.claude`, kept in sync with links: settings (with plugins and hooks), instructions, skills (with agents and commands), and history. MCP servers stay per account: add them with `CAM_ACCOUNT=work claude mcp add …`. See [DESIGN.md](DESIGN.md#sharing-m8).
 
 ## The marker file
 

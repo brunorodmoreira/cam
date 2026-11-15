@@ -14,7 +14,7 @@ cam's differentiators:
 
 1. **A portable marker file with walk-up lookup**, like fnm's `--version-file-strategy=recursive`. One file at a parent folder covers every nested repo, so nothing is committed into the repos themselves.
 2. **Claude Code's own login.** Each account logs in through Claude Code's normal flow: `cam add` and `cam login` run `claude auth login` in the account's dir, and `/login` in a session works too. cam never sees, stores or passes a credential. Sessions get the whole product: the plan in the header, `/usage` limits and claude.ai connectors.
-3. **Sharing you choose.** An account starts empty, the way Claude Code's docs set up several accounts. You can share whole groups of your setup with it: settings, instructions, extensions, history. They're symlinked from `~/.claude`, so they stay in sync.
+3. **Sharing you choose.** An account starts empty, the way Claude Code's docs set up several accounts. You can share whole groups of your setup with it: settings, instructions, skills, history. They're symlinked from `~/.claude`, so they stay in sync.
 4. **Resolved at launch, scoped to one process.** There's no `cd` hook. `CLAUDE_CONFIG_DIR` goes only into the environment of the `claude` process cam starts.
 5. **It explains itself.** `cam which` says which account was chosen and why. `cam whoami` adds who that account is logged in as, according to Claude Code. `cam doctor` checks the setup, the links and anything that would make Claude Code ignore the login.
 
@@ -76,23 +76,32 @@ cam first passed a long-lived `claude setup-token` token as `CLAUDE_CODE_OAUTH_T
   |---|---|---|
   | `settings` | `settings.json`, `keybindings.json`, `plugins/`, `hooks/` | permissions, hooks, model, theme, status line, plugins and the MCP servers they bring |
   | `instructions` | `CLAUDE.md`, `rules/` | your global instructions |
-  | `extensions` | `skills/`, `agents/`, `commands/`, `output-styles/` | your own skills, agents and commands |
+  | `skills` | `skills/`, `agents/`, `commands/`, `output-styles/` | your own skills, agents, slash commands and output styles |
   | `history` | `projects/`, `history.jsonl`, `file-history/`, `todos/`, `plans/` | transcripts, `/resume`, auto memory, prompt history |
 
-- **Never shared or copied:** MCP servers and first-run state. Copying them out of `.claude.json` would mean cam reading and writing a file of Claude Code's that can hold secrets, since MCP server configs often carry API keys. cam never writes inside Claude Code's files; it only makes links. Per account, MCP servers are added the native way (`CAM_ACCOUNT=work claude mcp add -s user …`), or come from a plugin shared through `settings`. Each account goes through the first-run screens once.
+- **Group names** say what's inside. `skills` was `extensions` in the first draft, which read like plugins, and plugins are in `settings`.
+- **Never shared or copied:** MCP servers and first-run state. Copying them out of `.claude.json` would mean cam reading and writing a file of Claude Code's that can hold secrets, since MCP server configs often carry API keys. cam never writes inside an existing file of Claude Code's; it only makes links, and the empty files and folders described under Links. Per account, MCP servers are added the native way (`CAM_ACCOUNT=work claude mcp add -s user …`), or come from a plugin shared through `settings`. Each account goes through the first-run screens once.
 - **Choosing:**
   - `cam add <name>` shows a picker with the four groups, none checked, when stdin and stderr are terminals. Enter shares nothing.
-  - `--share <groups>` takes a comma-separated list, `all` or `none`, and skips the picker. With no terminal and no `--share`, nothing is shared.
+  - The picker says what each group would share today, from a look at `~/.claude`: which of its files exist, and how many entries each folder holds (`settings: settings.json, plugins/ (4), hooks/ (2)`). Under the list, one line says what sharing means both ways: a shared group is the same files for both, so a change in either account shows up in the other.
+  - `--share <groups>` skips the picker. With no terminal and no `--share`, nothing is shared.
   - The choice is saved as `share = [...]` in `[accounts.<name>]`, in table order.
   - `cam share <name> <group>…` and `cam unshare <name> <group>…` change it later. `cam share <name>` alone, on a terminal, shows the picker with the current choice checked. Editing `share` by hand works too: the next launch adds the missing links.
+  - **One syntax everywhere:** groups can be comma-separated, separate words or repeated flags, and the forms mix: `--share settings,skills`, `--share settings --share skills`, `cam share work settings skills`, `cam share work settings,skills`. `all` means the four groups in each of them, `cam unshare work all` included. `none` is only for `--share`, where it skips the picker.
 - **Links:**
   - Absolute, to `<home>/.claude/<name>`.
   - A shared folder missing from `~/.claude` is created there, empty, then linked. Otherwise the account would make its own, and the two would never merge.
-  - A shared file is linked only if it exists in `~/.claude`. cam doesn't create user files: an empty `settings.json` or `keybindings.json` isn't valid JSON. If the account writes its own copy first, that file isn't shared, and `doctor` says so.
+  - A shared file missing from `~/.claude` is created there when its empty form is valid, then linked: `settings.json` as `{}`, `CLAUDE.md` and `history.jsonl` empty. Otherwise the account would write its own copy first, and sharing would never start. `keybindings.json` is linked only if it exists, since cam doesn't know its empty form; until then, `doctor` says it isn't shared.
   - Created by `add` before the login, and topped up by every launch (`exec`) and `login`, for the groups in `share`.
-  - A real file or folder in the account dir is never replaced. `exec` leaves it alone, `doctor` warns and names it, and `share` refuses to share that group until it's moved away.
-  - `unshare` removes the group's links and nothing else. The shared files stay in `~/.claude`, and the account starts over for that group.
-  - Deleting an account never follows links.
+  - A real file or folder in the account dir is never replaced at launch. `exec` leaves it alone and warns once per launch, naming it: `work's settings.json is a file, not a link to ~/.claude/settings.json, so work doesn't share it`, with `cam share work settings` as the fix. That's also how a file link that Claude Code replaced by renaming over it shows up. `doctor` warns the same way.
+- **When the account has its own copy,** `share` moves it aside instead of refusing, since an account that has been used always has some (its `settings.json` at least):
+  - It lists what it would move, and asks on a terminal. `--yes` skips the question; with no terminal and no `--yes`, it fails and names the entries.
+  - Each entry is renamed in the account dir to `<name>.before-share-<date>`, such as `settings.json.before-share-2026-11-20`, with `-2`, `-3` and so on if that's taken. Then the link takes its place.
+  - Nothing is deleted. It prints where each entry went, so the user can merge by hand: copy a setting across, or move a folder's contents into `~/.claude`.
+  - `doctor` lists `*.before-share-*` entries as `info`, so they're not forgotten.
+- **`unshare`** removes the group's links and nothing else, and says exactly what it removed: `work no longer shares settings: removed the links settings.json, plugins, hooks. Your files stay in ~/.claude, and work starts over for these.` A link that was never made, or a real file in its place, is named as skipped.
+  - `--copy` replaces each link with a copy of what it pointed to, so the account keeps the current setup and goes its own way from there. Folders are copied recursively without following links inside them. For `history`, it says how much it's about to copy first, since `projects/` can be large.
+- Deleting an account never follows links.
 - **File links are the weak spot.** Folder links hold, because whatever is written inside them lands in the shared folder. A file link (`settings.json`, `keybindings.json`, `CLAUDE.md`, `history.jsonl`) turns into a plain file if Claude Code saves by writing a new file and renaming it over the old one, and sharing then stops without an error. Only two write paths were checked (in the spike notes under Why another one). Before building M8, test the rest: `/config`, "always allow" rules, plugin installs and updates, `/memory` edits, keybinding changes and an auto-update. `doctor` warns when a link has become a file.
 
 ## Resolution
@@ -272,7 +281,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - **Config:** `$CAM_CONFIG`, else `~/.config/cam/config.toml`. It contains no secrets.
   ```toml
   [accounts.work]
-  share = ["settings", "extensions"]
+  share = ["settings", "skills"]
 
   [accounts.personal]
   ```
@@ -291,7 +300,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - Marker files contain only names. A hostile repo can at most pick another one of **your own** accounts, or `system`. A later `doctor` check could flag markers tracked in git.
 - Account dirs are 0700: their `.claude.json` holds MCP server configs, which can carry secrets.
 - Sharing is opt-in, one group at a time, and a shared group is the same for every account that shares it. With `history`, work transcripts and memory sit in `~/.claude/projects` next to personal ones. With `settings`, the same hooks run in every account. An org's managed settings and policy caches always stay in its own account.
-- cam never writes inside Claude Code's files. Sharing only adds links in the account dir, and empty folders in `~/.claude`.
+- cam never writes inside an existing file of Claude Code's. Sharing only adds links in the account dir, renames the account's own copies aside (never deleting them), and creates a missing shared folder or file in `~/.claude`, empty (`{}` for `settings.json`).
 
 ## Crates
 
@@ -309,7 +318,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - Ctrl-C during `add` was checked by hand, by sending SIGINT to the process group the way a terminal does: cam logged out and deleted the dir.
 - The sandbox clears the environment and sets its own `HOME` and `PATH`, so the real `~/.claude`, the real `claude` and the real Keychain are out of reach.
 - **Resolution unit tests** on temp directory trees: nearest wins, `system` overrides a parent, env beats file, invalid or unknown names fail.
-- **Sharing (M8):** only the chosen groups are linked, links are topped up on launch, a real file is never replaced, `unshare` removes only links, and `remove` never follows one, so the shared targets survive. Tests choose through `--share` and a stdin that isn't a terminal. The picker itself isn't driven by tests.
+- **Sharing (M8):** only the chosen groups are linked, links are topped up on launch, a real file is never replaced at launch and `exec` warns about it, `share` moves the account's copies aside and never deletes, `unshare` removes only links (or leaves copies with `--copy`), and `remove` never follows one, so the shared targets survive. Every group syntax parses to the same list. Tests choose through `--share`, `--yes` and a stdin that isn't a terminal. The picker itself isn't driven by tests.
 - **PATH discovery** and **plain `claude` end to end:** fake `claude` scripts, cam's link earlier on PATH, `argv[0]` really `claude`, and `init` refusing a real `claude` in the shim dir. `init`'s code is run in a real bash 3.2 (`--norc`) and zsh (`-f`, with and without `compinit`): afterwards `claude` resolves to the link and runs the fake `claude` as the folder's account.
 - **`remove`'s question** isn't driven by tests, whose stdin isn't a terminal: they cover the refusal without `--yes`. It was tried by hand through a pseudo-terminal.
 - **`whoami` and `doctor`:** the check logic is unit tested without I/O. End to end, settings files and variables hold fake secrets, and the tests assert that no value is ever printed.
@@ -324,7 +333,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 5. `whoami` and `doctor`.
 6. Shell completions.
 7. **Native logins (done 2026-11-15):** an account is an empty config dir with its own login, and shares nothing yet. `add`/`login`/`remove` through `claude auth`, `system` in place of `none`, no `default`, `list`/`whoami`/`doctor` from Claude Code's own record. The Keychain store, the token prompt and `token_created` go.
-8. **Sharing (next):** first, test which write paths keep a file link. Then the four groups, the picker and `--share`, `share`/`unshare`, links topped up on launch, and `doctor`'s link checks.
+8. **Sharing (next):** first, test which write paths keep a file link. Then the four groups, the picker and `--share`, `share` (moving copies aside) and `unshare` (with `--copy`), links topped up on launch with `exec`'s warning, and `doctor`'s link checks.
 9. A release (cargo-dist / Homebrew tap). Not planned yet.
 
 Later ideas: Linux (the design no longer needs a secret store, so it may just work *(verify)*), a status-line snippet for the README that reads `CAM_ACTIVE_ACCOUNT` (the docs don't say whether a `statusLine` command inherits claude's environment *(verify)*), and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
@@ -346,7 +355,8 @@ Later ideas: Linux (the design no longer needs a secret store, so it may just wo
   - `default` goes, along with the planned `cam default`: a marker in the home folder covers it.
   - No `--email` of cam's own: the account name is the label, and the real email comes from Claude Code. `add` doesn't fill in `--email` for the login either, but the user can pass Claude Code's own after `--`.
   - `cam login [<name>]` runs Claude Code's login again for an account that already exists. It needs no state of its own, and `/login` in a session does the same.
-  - Accounts start empty and share nothing by default. Sharing is by group (`settings`, `instructions`, `extensions`, `history`), chosen in `add` with a picker or `--share`, and changed with `share`/`unshare`. Links keep the groups in sync.
+  - Accounts start empty and share nothing by default. Sharing is by group (`settings`, `instructions`, `skills`, `history`), chosen in `add` with a picker or `--share`, and changed with `share`/`unshare`. Links keep the groups in sync.
+  - From the DX review, for M8: `extensions` is renamed `skills`. `share` moves an account's own copy aside under a dated name instead of refusing, asking first and never deleting. Missing shared files with a valid empty form are created. `exec` warns about a link that has become a file. Group lists take every syntax and `all`. `unshare` reports what it removed, and `--copy` keeps a snapshot.
   - MCP servers and first-run state are neither shared nor copied, because cam never writes inside Claude Code's files.
   - M7 ships accounts without sharing, and all link code moves to M8.
   - After a DX review of M7: `cam init <shell>` replaces `cam shim install`/`uninstall`. Arguments after `--` go to `claude auth login`, which keeps the native flow while allowing `--email` and `--sso`. `remove` always asks when there's a dir, with `--yes` for scripts. The same-account warning compares the org too.
