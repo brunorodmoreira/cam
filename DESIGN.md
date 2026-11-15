@@ -33,7 +33,7 @@ Observed with CLI 2.1.325 (spike, 2026-11-14):
 - First-run screens appeared before the session started (which ones wasn't recorded).
 - Deleting the account dir after `claude auth logout` left everything in `~/.claude` intact.
 - Earlier, in a scratch config dir: `claude mcp add -s user` and `claude plugin install` wrote through a symlinked `.claude.json` and `settings.json`, and the links survived.
-- From the CLI's code, not yet seen in the Keychain *(verify)*: the login is stored as a generic password with service `Claude Code-credentials`, plus `-<first 8 hex digits of sha256(CLAUDE_CONFIG_DIR)>` when the variable is set. So the dir's spelling matters, and cam must always pass the same one.
+- The login is stored as a generic password with service `Claude Code-credentials`, plus `-<first 8 hex digits of sha256(CLAUDE_CONFIG_DIR)>` when the variable is set. Seen in the Keychain for two accounts added with `cam add` (2026-11-15). So the dir's spelling matters, and cam must always pass the same one.
 - The system login's `loginExpiresAt` moved from 2026-11-16 (seen 2026-11-12) to 2026-12-11, so it seems to be extended as the login is used *(verify for an idle account)*.
 
 Observed with CLI 2.1.325 in an empty config dir (2026-11-15):
@@ -149,7 +149,7 @@ system (no CAM_ACCOUNT or .claude-account)
 ### `login`
 - **Which account:** `<name>`, or the one that applies here, resolved as `exec` resolves it. Without a name, cam prints the `which` line first, so logging in from the wrong folder is obvious. `system` is allowed: that's plain `claude auth login` on Claude Code's own setup.
 - **Checks first:** the name is configured (or `system`), its dir exists (or it fails with the `cam add <name>` hint, as `exec` does), and the real `claude` is found. Then it tops up the links of the groups the account shares.
-- **Runs** `claude auth login` with the environment `exec` would give `claude`, the terminal passed through and no flags. Claude Code replaces the account's login *(verify that it replaces one that's still valid rather than refusing)*.
+- **Runs** `claude auth login` with the environment `exec` would give `claude`, the terminal passed through and no flags. Claude Code replaces the account's login, even one that's still valid: it goes through the browser again, and the expiry moves forward (checked 2026-11-15).
 - **Confirms** with `claude auth status --json` and prints `work: logged in as you@company.com (Acme, team)`, with the same-account warning as `add`.
 - **If the login fails or is cancelled,** it exits non-zero and deletes nothing.
 - It's the same login as `/login` in a session. `cam login` is for when no session is open: a login about to expire, a `doctor` failure, or the wrong claude.ai account after `add`.
@@ -303,7 +303,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - **Sharing (M8):** only the chosen groups are linked, links are topped up on launch, a real file is never replaced, `unshare` removes only links, and `remove` never follows one, so the shared targets survive. Tests choose through `--share` and a stdin that isn't a terminal. The picker itself isn't driven by tests.
 - **PATH discovery** and the **shim end to end,** as before: fake `claude` scripts, a shim symlink earlier on PATH, `argv[0]` really `claude`, and `install`/`uninstall` refusing a real `claude`.
 - **`whoami` and `doctor`:** the check logic is unit tested without I/O. End to end, settings files and variables hold fake secrets, and the tests assert that no value is ever printed.
-- **Manual acceptance:** after `cam add work`, `/status` in a folder marked `work` shows the work account, and outside it shows the system login. The Keychain has the slot named above. From M8, with every group shared, the links are still links after a session.
+- **Manual acceptance:** after `cam add work`, `/status` in a folder marked `work` shows the work account, and outside it shows the system login. The Keychain has the slot named above. Passed 2026-11-15 with two work accounts on Team plans next to a personal Max login: each `/status` showed its own org, with "Enterprise managed settings (remote)" only in the work account. Plain `claude` reaches cam only once the shim dir is on `PATH`, and `doctor` warns until it is. From M8, with every group shared, the links are still links after a session.
 
 ## Milestones
 
