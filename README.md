@@ -52,15 +52,15 @@ It isn't on crates.io yet. It will be published as `cam-cli`, because `cam` is t
 Add an account. Run `claude setup-token` while logged in to that account, then paste the token it prints when cam asks. The input is hidden, and the token goes straight into the macOS Keychain:
 
 ```sh
-cam add work --email you@company.com
+cam add work
 cam add personal
 cam list
 ```
 
 ```console
-ACCOUNT   EMAIL            TOKEN ADDED
-personal  -                2026-11-11 (today)
-work      you@company.com  2026-11-11 (today)
+ACCOUNT   TOKEN ADDED
+personal  2026-11-11 (today)
+work      2026-11-11 (today)
 ```
 
 Then pin accounts to folders:
@@ -97,7 +97,6 @@ To check what applies and whether anything will get in the way:
 ```console
 $ cam whoami
 work (from /Users/me/Work/.claude-account)
-  email:   you@company.com (expected, not verified)
   token:   stored in the macOS Keychain, added 2026-11-11 (3 days ago), good until about 2027-11-11
 $ cam doctor
 ok    claude: /Users/me/.local/bin/claude
@@ -119,7 +118,7 @@ no problems found
 - the folder's marker;
 - anything that would make Claude Code ignore cam's token, in your environment and in Claude Code's settings files.
 
-It exits non-zero if a check fails. Neither command reads a token, so neither can cause a Keychain prompt. Neither can tell whose a token is, either: in token mode, Claude Code doesn't report the account's email. So the email stays what you said it would be.
+It exits non-zero if a check fails. Neither command reads a token, so neither can cause a Keychain prompt. Neither can tell whose a token is, either: in token mode, Claude Code doesn't report the account's email.
 
 ### Shell completions
 
@@ -144,7 +143,6 @@ Accounts live in `~/.config/cam/config.toml`, or wherever `$CAM_CONFIG` points. 
 default = "personal"
 
 [accounts.work]
-email = "you@company.com"
 token_created = 2026-11-11
 ```
 

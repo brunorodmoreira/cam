@@ -54,32 +54,16 @@ fn account_name(name: &str) -> Result<String, Error> {
     }
 }
 
-fn is_plausible_email(email: &str) -> bool {
-    email
-        .split_once('@')
-        .is_some_and(|(user, domain)| !user.is_empty() && !domain.is_empty())
-        && !email.chars().any(char::is_whitespace)
-}
-
 /// `cam add`: stores the token, then records the account in the config.
 /// If the config write fails, a newly stored token is deleted again.
 pub fn add(
     name: &str,
-    email: Option<&str>,
     force: bool,
     config_path: &Path,
     store: &dyn SecretStore,
     read_token: impl FnOnce(&str) -> Result<Token, Error>,
 ) -> Result<()> {
     let name = account_name(name)?;
-    if let Some(email) = email
-        && !is_plausible_email(email)
-    {
-        return Err(Error::InvalidEmail {
-            email: email.to_owned(),
-        }
-        .into());
-    }
     // A broken config fails here, before the token prompt.
     Config::load(config_path)?;
     let had_token = store.contains(&name)?;
@@ -92,7 +76,7 @@ pub fn add(
     }
     let token = read_token(&name)?;
     store.set(&name, &token)?;
-    if let Err(err) = config::add_account(config_path, &name, email, date::today()) {
+    if let Err(err) = config::add_account(config_path, &name, date::today()) {
         if !had_token {
             // Best effort: don't leave a token behind that the config doesn't know.
             let _ = store.delete(&name);
@@ -150,11 +134,7 @@ fn list_lines(config: &Config, today: Date) -> Vec<String> {
         return vec!["no accounts yet; add one with `cam add <name>`".to_owned()];
     }
     let default = config.default_selection();
-    let mut rows = vec![[
-        "ACCOUNT".to_owned(),
-        "EMAIL".to_owned(),
-        "TOKEN ADDED".to_owned(),
-    ]];
+    let mut rows = vec![["ACCOUNT".to_owned(), "TOKEN ADDED".to_owned()]];
     for (name, account) in config.accounts() {
         let is_default = default.as_ref() == Some(&Selection::Account(name.clone()));
         let added = match account.token_created.and_then(|created| created.date) {
@@ -167,20 +147,17 @@ fn list_lines(config: &Config, today: Date) -> Vec<String> {
             } else {
                 name.clone()
             },
-            account.email.clone().unwrap_or_else(|| "-".to_owned()),
             added,
         ]);
     }
-    let width = |column: usize| {
-        rows.iter()
-            .map(|row| row[column].chars().count())
-            .max()
-            .unwrap_or(0)
-    };
-    let (name_width, email_width) = (width(0), width(1));
+    let name_width = rows
+        .iter()
+        .map(|[name, _]| name.chars().count())
+        .max()
+        .unwrap_or(0);
     let mut lines: Vec<String> = rows
         .iter()
-        .map(|[name, email, added]| format!("{name:<name_width$}  {email:<email_width$}  {added}"))
+        .map(|[name, added]| format!("{name:<name_width$}  {added}"))
         .collect();
     if default == Some(Selection::PassThrough) {
         lines.push(String::new());
@@ -202,8 +179,7 @@ fn env_set(key: &str) -> Option<OsString> {
     env::var_os(key).filter(|value| !value.is_empty())
 }
 
-/// `cam whoami`: the account for this folder, its expected email and its
-/// token. It checks that the token is stored without reading it, so it
+/// `cam whoami`: the account for this folder and its token. It checks that the token is stored without reading it, so it
 /// can't cause a Keychain prompt. Fails when `claude` here would fail for
 /// lack of a token.
 pub fn whoami(config_path: &Path) -> Result<()> {
@@ -230,10 +206,6 @@ pub fn whoami(config_path: &Path) -> Result<()> {
                 .accounts()
                 .get(name)
                 .ok_or_else(|| Error::UnknownAccountArg { name: name.clone() })?;
-            match &account.email {
-                Some(email) => say(format_args!("  email:   {email} (expected, not verified)")),
-                None => say("  email:   not recorded"),
-            }
             let store = store::open()?;
             if store.contains(name)? {
                 let today = date::today();
@@ -256,7 +228,7 @@ pub fn whoami(config_path: &Path) -> Result<()> {
                 if let Some(problem) = problem {
                     warnings.push(format!(
                         "the token for \"{name}\" {problem}\n{}",
-                        doctor::renew_hint(name, account.email.as_deref())
+                        doctor::renew_hint(name)
                     ));
                 }
             } else {
@@ -563,22 +535,14 @@ mod tests {
         let tree = Tree::new();
         let config = tree.root.join("config.toml");
         let store = store(&tree);
-        add(
-            "work",
-            Some("you@company.com"),
-            false,
-            &config,
-            &store,
-            |name| {
-                assert_eq!(name, "work");
-                Ok(fake_token(1))
-            },
-        )
+        add("work", false, &config, &store, |name| {
+            assert_eq!(name, "work");
+            Ok(fake_token(1))
+        })
         .unwrap();
         assert!(store.contains("work").unwrap());
         let loaded = Config::load(&config).unwrap();
         let account = &loaded.accounts()["work"];
-        assert_eq!(account.email.as_deref(), Some("you@company.com"));
         assert_eq!(
             account.token_created.and_then(|created| created.date),
             Some(date::today())
@@ -590,11 +554,11 @@ mod tests {
         let tree = Tree::new();
         let config = tree.root.join("config.toml");
         let store = store(&tree);
-        add("work", None, false, &config, &store, |_| Ok(fake_token(1))).unwrap();
-        let err = add("work", None, false, &config, &store, no_prompt).unwrap_err();
+        add("work", false, &config, &store, |_| Ok(fake_token(1))).unwrap();
+        let err = add("work", false, &config, &store, no_prompt).unwrap_err();
         assert!(err.to_string().contains("--force"), "{err}");
 
-        add("work", None, true, &config, &store, |_| Ok(fake_token(2))).unwrap();
+        add("work", true, &config, &store, |_| Ok(fake_token(2))).unwrap();
         let stored = fs::read_to_string(tree.root.join("store/work")).unwrap();
         assert_eq!(stored, fake_token(2).expose());
     }
@@ -602,14 +566,11 @@ mod tests {
     #[test]
     fn add_fills_in_a_hand_written_account_without_force() {
         let tree = Tree::new();
-        let config = tree.config("[accounts.work]\nemail = \"you@company.com\"\n");
+        let config = tree.config("# mine\n[accounts.work]\n");
         let store = store(&tree);
-        add("work", None, false, &config, &store, |_| Ok(fake_token(1))).unwrap();
-        let loaded = Config::load(&config).unwrap();
-        assert_eq!(
-            loaded.accounts()["work"].email.as_deref(),
-            Some("you@company.com")
-        );
+        add("work", false, &config, &store, |_| Ok(fake_token(1))).unwrap();
+        assert!(store.contains("work").unwrap());
+        assert!(fs::read_to_string(&config).unwrap().starts_with("# mine\n"));
     }
 
     #[test]
@@ -617,16 +578,11 @@ mod tests {
         let tree = Tree::new();
         let config = tree.root.join("config.toml");
         let store = store(&tree);
-        for (name, email) in [
-            ("Work", None),
-            ("none", None),
-            ("work", Some("not-an-email")),
-            ("work", Some("a b@c.d")),
-        ] {
-            assert!(add(name, email, false, &config, &store, no_prompt).is_err());
+        for name in ["Work", "none", ""] {
+            assert!(add(name, false, &config, &store, no_prompt).is_err());
         }
         let broken = tree.config("not toml");
-        assert!(add("work", None, false, &broken, &store, no_prompt).is_err());
+        assert!(add("work", false, &broken, &store, no_prompt).is_err());
         assert!(!store.contains("work").unwrap());
     }
 
@@ -638,7 +594,7 @@ mod tests {
         fs::write(&config, "").unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
         let store = store(&tree);
-        let result = add("work", None, false, &config, &store, |_| Ok(fake_token(1)));
+        let result = add("work", false, &config, &store, |_| Ok(fake_token(1)));
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(result.is_err());
         assert!(!store.contains("work").unwrap());
@@ -649,18 +605,12 @@ mod tests {
         let tree = Tree::new();
         let dir = tree.dir("locked");
         let config = dir.join("config.toml");
+        fs::write(&config, "[accounts.work]\ntoken_created = 2025-01-01\n").unwrap();
         let store = store(&tree);
-        add("work", None, false, &config, &store, |_| Ok(fake_token(1))).unwrap();
+        store.set("work", &fake_token(1)).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
-        // A new email forces a config write, which the locked dir makes fail.
-        let result = add(
-            "work",
-            Some("new@company.com"),
-            true,
-            &config,
-            &store,
-            |_| Ok(fake_token(2)),
-        );
+        // The new date forces a config write, which the locked dir makes fail.
+        let result = add("work", true, &config, &store, |_| Ok(fake_token(2)));
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(result.is_err());
         assert!(store.contains("work").unwrap());
@@ -671,7 +621,7 @@ mod tests {
         let tree = Tree::new();
         let config = tree.root.join("config.toml");
         let store = store(&tree);
-        add("work", None, false, &config, &store, |_| Ok(fake_token(1))).unwrap();
+        add("work", false, &config, &store, |_| Ok(fake_token(1))).unwrap();
         remove("work", &config, &store).unwrap();
         assert!(!store.contains("work").unwrap());
         assert!(!Config::load(&config).unwrap().has_account("work"));
@@ -727,17 +677,17 @@ mod tests {
     fn list_aligns_columns_and_marks_default() {
         let config = config_from(
             "default = \"work\"\n\
-             [accounts.work]\nemail = \"you@company.com\"\ntoken_created = 2026-11-11\n\
+             [accounts.work]\ntoken_created = 2026-11-11\n\
              [accounts.personal]\ntoken_created = 2026-11-02\n\
              [accounts.old]\n",
         );
         assert_eq!(
             list_lines(&config, TODAY),
             [
-                "ACCOUNT         EMAIL            TOKEN ADDED",
-                "old             -                unknown",
-                "personal        -                2026-11-02 (9 days ago)",
-                "work (default)  you@company.com  2026-11-11 (today)",
+                "ACCOUNT         TOKEN ADDED",
+                "old             unknown",
+                "personal        2026-11-02 (9 days ago)",
+                "work (default)  2026-11-11 (today)",
             ]
         );
     }

@@ -75,9 +75,6 @@ pub enum Error {
     #[error("\"none\" is reserved and can't be an account name")]
     ReservedName,
 
-    #[error("invalid email \"{email}\"")]
-    InvalidEmail { email: String },
-
     #[error("cannot read the token")]
     ReadToken(#[source] io::Error),
 

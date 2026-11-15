@@ -13,7 +13,7 @@ cam's differentiators:
 1. **One shared Claude Code setup.** It swaps only the credential, using a `claude setup-token` token passed as `CLAUDE_CODE_OAUTH_TOKEN`. Settings, plugins, memory and history stay shared.
 2. **Resolved at launch, scoped to one process.** There is no `cd` hook exporting secrets into the shell. The token goes only into the environment of the `claude` process cam starts.
 3. **A portable marker file with walk-up lookup**, like fnm's `--version-file-strategy=recursive`. One file at a parent folder covers every nested repo, so nothing is committed into the repos themselves.
-4. **It explains itself.** `cam which` says which account was chosen and why. `cam whoami` adds the expected email and the token's age. `cam doctor` checks the setup and anything that would make Claude Code ignore the token. Checking whose a token is remains open (see Doctor checks).
+4. **It explains itself.** `cam which` says which account was chosen and why. `cam whoami` adds the token's age. `cam doctor` checks the setup and anything that would make Claude Code ignore the token. Checking whose a token is remains open (see Doctor checks).
 
 Known trade-offs of token mode (documented by Anthropic):
 - Sessions using `CLAUDE_CODE_OAUTH_TOKEN` cannot use Remote Control or fetch claude.ai connectors.
@@ -67,13 +67,13 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 
 | Command | Does |
 |---|---|
-| `cam add <name> [--email <expected>] [--force]` | Prompts for the token with **hidden input** (from `claude setup-token`). Stores it in the Keychain and records the account in config. The email is recorded, not verified: in token mode, nothing reports whose a token is (see Doctor checks). |
+| `cam add <name> [--force]` | Prompts for the token with **hidden input** (from `claude setup-token`). Stores it in the Keychain and records the account in config. |
 | `cam remove <name>` | Deletes the Keychain item and the config entry. |
-| `cam list` | Accounts, expected email, token age and default. Never shows tokens. |
+| `cam list` | Accounts, token age and default. Never shows tokens. |
 | `cam use <name> [--dir <d>]` | Writes `.claude-account` in the current directory (or `<d>`, which must exist), containing just `<name>\n` and replacing any existing marker. Validates that the name exists. `cam use none` writes a pass-through marker and needs no account. |
 | `cam unuse [--dir <d>]` | Removes the marker in that folder only, never a parent's. If that folder has none, it exits non-zero and names the nearest parent marker. |
 | `cam which` | Resolved account and its source: env, a file path, the default, or none. |
-| `cam whoami` | The resolved account, its expected email and its stored token's age. Never reads the token. |
+| `cam whoami` | The resolved account and its stored token's age. Never reads the token. |
 | `cam doctor` | Health checks (below). Never reads a token. |
 | `cam exec [--] <args…>` | Resolves, then execs the real `claude` with `<args…>` and the account's token. |
 | `cam shim install [--dir <d>]` / `cam shim uninstall [--dir <d>]` | Creates or removes the `claude` → `cam` symlink, and says how to put it first on PATH. Never edits shell startup files. |
@@ -81,12 +81,13 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 
 ### `add`, `remove` and `list` (M2)
 - **Token input:** when stdin is a terminal, `add` uses a hidden prompt. Otherwise it reads all of stdin, so scripts can run `cam add work < file`. The input is trimmed and must match `sk-ant-[A-Za-z0-9_-]+`. `setup-token` tokens start `sk-ant-oat01-` (checked 2026-11-12), but cam doesn't require that, so a new token version still works. Anything starting `sk-ant-api` is rejected as an API key. Token errors never echo the input.
-- **Validation order:** `add` validates the name (valid, not `none`), the `--email` (one `@`, no spaces) and the config before prompting.
-- **Replacing:** if a token is already stored, `add` refuses unless `--force` is given. A config entry with no stored token, such as one written by hand, is filled in without `--force`. Replacing keeps the entry's existing email unless `--email` is given.
+- **Validation order:** `add` validates the name (valid, not `none`) and the config before prompting.
+- **Replacing:** if a token is already stored, `add` refuses unless `--force` is given. A config entry with no stored token, such as one written by hand, is filled in without `--force`.
 - **Recording:** `add` stores the token first, then writes the config entry with `token_created` = today (UTC). If the config write fails, a newly stored token is deleted again. A replaced one is kept, since the old token is already gone.
-- **Identity check:** not done. In token mode, `claude auth status` reports no email, and no other source is known yet (see Doctor checks). `--email` only records the expected identity.
+- **Identity check:** not done. In token mode, `claude auth status` reports no email, and no other source is known yet (see Doctor checks).
+- **No email (2026-11-15):** `add` used to take an `--email` and record it as the expected identity. It was dropped: nothing could check it, so cam only repeated what the user typed. The account name is the label. Showing an email again waits for a source that reports the real one.
 - **`remove`:** checks that the config parses, deletes the token (a failure here leaves the config untouched), then deletes the config entry. If the account was the `default`, it clears `default` and says so on stderr. It works on partial state (only a token, or only an entry), and fails if there's neither.
-- **`list`:** reads only the config, never the store, so it can't trigger a Keychain prompt. It shows one row per account (name, email or `-`, and token date with age) and marks the default. Whether a token is actually stored is left to `doctor`.
+- **`list`:** reads only the config, never the store, so it can't trigger a Keychain prompt. It shows one row per account (name, and token date with age) and marks the default. Whether a token is actually stored is left to `doctor`.
 - **Config writes:** via `toml_edit`, so comments and formatting survive. cam refuses to edit a config that doesn't validate and checks the result validates too. It skips the write when nothing changed, writes atomically (temp file + rename), writes through a symlink rather than replacing it, keeps an existing file's permissions, and creates `~/.config/cam/` if needed.
 
 ### `exec` (M3)
@@ -129,18 +130,18 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 - *(verify)* Claude Code's own `/doctor` or its updater may notice that the `claude` on `PATH` is a symlink to another program.
 
 ### `whoami` (M5)
-- Prints the `which` line, then for an account its email (`expected, not verified`, or `not recorded`) and its token: where it's stored and its age (see token age below). For pass-through it names the login Claude Code will use: its own `/login`, or a `CLAUDE_CODE_OAUTH_TOKEN` the user exported. A token that a parent cam passed doesn't count, since `exec` drops it.
+- Prints the `which` line, then for an account its token: where it's stored and its age (see token age below). For pass-through it names the login Claude Code will use: its own `/login`, or a `CLAUDE_CODE_OAUTH_TOKEN` the user exported. A token that a parent cam passed doesn't count, since `exec` drops it.
 - Inside a cam session (`CAM_ACTIVE_ACCOUNT` set), it adds which account that session runs as.
 - Warns on stderr about a token due for renewal, and about anything in the environment that outranks the token. Warnings come after the report, not in the middle of it.
 - It checks the token with `SecretStore::contains`, which never reads it, so it can't cause a Keychain prompt. With no token stored, it prints the report, then fails like `exec` would, with the `cam add` hint.
 
 ### Completions (M6)
 - **Static scripts from `clap_complete`,** not its run-time mode. That mode sits behind an `unstable-dynamic` feature whose API can change between minor versions. With static scripts, nothing runs cam while completing.
-- **Account names are baked in** when the script is generated, as the values of `use` (plus `none`) and `remove`. That's done on a copy of the command used only for generation, so parsing still accepts any name. An email becomes the value's description when it uses only `[A-Za-z0-9@._%+-]`. clap escapes help text, but the config is hand-editable, so anything else is left out instead of trusted to escaping.
+- **Account names are baked in** when the script is generated, as the values of `use` (plus `none`) and `remove`. That's done on a copy of the command used only for generation, so parsing still accepts any name.
 - **Loaded at shell start,** with `eval "$(cam completions zsh)"` and the like, rather than saved to a file. New accounts appear in the next shell. `eval` rather than `source <(…)`, because macOS's bash 3.2 can't source a process substitution.
 - **Quiet:** a missing or broken config gives a script without names and no error, since this runs at every shell start.
 - **fish:** clap's fish script completes no positional values, so cam appends one `complete` line per value, using the `__fish_cam_using_subcommand` function clap's script defines. Not tried in a real fish *(verify)*.
-- Tested: in bash 3.2, by calling the completion function with `COMP_WORDS`. In zsh, through a pseudo-terminal during development (not in the test suite): names come with their emails.
+- Tested: in bash 3.2, by calling the completion function with `COMP_WORDS`. In zsh, through a pseudo-terminal during development (not in the test suite).
 - The output is redacted like everything else.
 
 ### Doctor checks
@@ -149,7 +150,7 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
 - **shim:** what plain `claude` runs: the first executable `claude` on `PATH`. `ok` if that's a cam shim or cam itself. `warn` if a shim is installed in the default dir but isn't reached, with a pointer to `cam shim install`, which prints the line to fix. `info` if there's no shim: it's optional, and `cam exec` works without it.
 - **config:** parses, with the number of accounts and the default. A missing file or no accounts is `info`.
 - **account `<name>`,** one per configured account: the token is stored (`fail` if not) and its age.
-- **Token age,** shared with `whoami`, counted from `token_created`. `setup-token` says its tokens are "valid for 1 year", so `doctor` reads that as 365 days. From 330 days old it warns, with a hint naming the email if known. After 365 days it fails: "probably expired". No `token_created` is `info`. `loginExpiresAt` is `null` in token mode, so it can't be used.
+- **Token age,** shared with `whoami`, counted from `token_created`. `setup-token` says its tokens are "valid for 1 year", so `doctor` reads that as 365 days. From 330 days old it warns, with a hint on renewing it. After 365 days it fails: "probably expired". No `token_created` is `info`. `loginExpiresAt` is `null` in token mode, so it can't be used.
 - **here:** the folder's resolution, as `which` prints it, or its error.
 - **environment:** in this shell, the variables that outrank the token: `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` (set and non-empty), and `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_USE_FOUNDRY` when on (`1`, `true`, `yes` or `on`, the values the docs give for boolean variables). It also covers `CLAUDE_CODE_OAUTH_TOKEN`:
   - Exported by the user, outside a cam session: warn. Every program started from the shell can read it, and pass-through folders use it instead of `/login`.
@@ -160,7 +161,7 @@ none (pass-through: no CAM_ACCOUNT, .claude-account or default)
   - `.claude/settings.local.json` at the git root, else in the current directory.
   - A file that can't be read or isn't JSON is a warning. Managed settings aren't checked: remote ones can't be read.
 - **Only names are printed, never values:** `env` values and `apiKeyHelper` commands can be secrets.
-- **Identity (open):** check that each token belongs to its expected email. This would catch a token minted in the wrong browser session. It matters more than first thought: `setup-token` enforces only `forceLoginMethod`, not `forceLoginOrgUUID`, so it can mint a token in a different org than the admin intended (https://code.claude.com/docs/en/authentication.md). But nothing reports a token's owner:
+- **Identity (open):** check whose each token is. This would catch a token minted in the wrong browser session. It matters more than first thought: `setup-token` enforces only `forceLoginMethod`, not `forceLoginOrgUUID`, so it can mint a token in a different org than the admin intended (https://code.claude.com/docs/en/authentication.md). But nothing reports a token's owner:
   - `auth status` and `/status` show no email or org in token mode.
   - The docs say a `setup-token` token "can only make model requests", so the OAuth profile endpoint will probably refuse it.
   - The candidates left need cam to call the API with the token itself, which today only `claude` does. A live check would also show whether the server still accepts the token. See Open questions.
@@ -186,7 +187,6 @@ With `CLAUDE_CODE_OAUTH_TOKEN` (through `cam exec`). `loggedIn` may only mean th
   default = "personal"            # optional
 
   [accounts.work]
-  email = "you@company.com"       # expected identity, checked by doctor
   token_created = 2026-11-11
   ```
   - An empty `CAM_CONFIG` counts as unset. The fallback really is `~/.config/cam/config.toml` on macOS as well (not `~/Library/Application Support`), and `XDG_CONFIG_HOME` is not consulted.
@@ -245,6 +245,6 @@ v2 ideas: a per-account `mode = "config-dir"` (for Remote Control and connectors
   - An authenticated call from cam itself, such as the free token-counting endpoint, to see whether the response identifies the organization. That would mean cam sending the token over HTTPS, adding an HTTP client, and widening where the token goes beyond the `claude` child (Security rules).
   - A one-word `claude -p` run under the token. This proves the token is accepted but not whose it is, and costs a little plan usage.
   - Comparing the org from a `/login` session of the same account (`auth status` reports `orgId` there) against whatever a token-side call reveals.
-  Until one works, `doctor` stays offline and the email is only recorded.
+  Until one works, `doctor` stays offline and cam can't say whose a token is.
 - **Keychain prompts after rebuilds:** an unsigned or ad-hoc-signed build counts as a new app, so every `cargo install` brings the prompt back, once per account. Signing release builds with a stable identity (Developer ID, as part of M6) should make "Always Allow" survive upgrades *(verify)*. Source builds will keep prompting unless they're signed locally.
 - **Answered 2026-11-12:** what `claude auth status --json` reports on `CLAUDE_CODE_OAUTH_TOKEN`. It's `authMethod: "oauth_token"` with no identity and `loginExpiresAt: null`. That leaves a new question: how M5 can tell which account a token belongs to (see Doctor checks).

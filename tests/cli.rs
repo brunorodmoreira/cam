@@ -14,7 +14,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-const CONFIG: &str = "[accounts.work]\nemail = \"you@company.com\"\n\n[accounts.personal]\n";
+const CONFIG: &str = "[accounts.work]\n\n[accounts.personal]\n";
 
 struct Sandbox {
     _tmp: TempDir,
@@ -598,20 +598,18 @@ fn add_uses_the_test_store_not_the_keychain() {
 }
 
 #[test]
-fn add_records_account_and_email() {
+fn add_records_the_account() {
     let sb = Sandbox::with_config(None);
     sb.cam(&sb.root)
-        .args(["add", "work", "--email", "you@company.com"])
+        .args(["add", "work"])
         .write_stdin(TOKEN)
         .assert()
         .success();
     let config = read(&sb.config);
     assert!(
-        predicate::str::is_match(
-            r#"^\[accounts\.work\]\nemail = "you@company.com"\ntoken_created = \d{4}-\d{2}-\d{2}\n$"#
-        )
-        .unwrap()
-        .eval(&config),
+        predicate::str::is_match(r"^\[accounts\.work\]\ntoken_created = \d{4}-\d{2}-\d{2}\n$")
+            .unwrap()
+            .eval(&config),
         "{config}"
     );
 
@@ -644,7 +642,7 @@ fn add_keeps_existing_config_comments() {
 fn add_twice_needs_force() {
     let sb = Sandbox::with_config(None);
     sb.cam(&sb.root)
-        .args(["add", "work", "--email", "you@company.com"])
+        .args(["add", "work"])
         .write_stdin(TOKEN)
         .assert()
         .success();
@@ -667,7 +665,6 @@ fn add_twice_needs_force() {
         .success()
         .stdout(predicate::str::starts_with("replaced work: token saved"));
     assert_eq!(sb.stored("work").as_deref(), Some(TOKEN_2));
-    assert!(read(&sb.config).contains("email = \"you@company.com\""));
 }
 
 #[test]
@@ -700,15 +697,11 @@ fn add_rejects_bad_tokens_without_echoing_them() {
 }
 
 #[test]
-fn add_rejects_bad_names_and_emails() {
+fn add_rejects_bad_names() {
     let sb = Sandbox::with_config(None);
     for (args, message) in [
         (vec!["add", "Work"], "invalid account name \"Work\""),
         (vec!["add", "none"], "\"none\" is reserved"),
-        (
-            vec!["add", "work", "--email", "nope"],
-            "invalid email \"nope\"",
-        ),
     ] {
         sb.cam(&sb.root)
             .args(&args)
@@ -809,19 +802,19 @@ fn list_shows_accounts_and_default() {
     assert_eq!(lines.len(), 4, "{stdout}");
     assert!(lines[0].starts_with("ACCOUNT"), "{stdout}");
     assert!(
-        predicate::str::is_match(r"^oss +- +\d{4}-\d{2}-\d{2} \(today\)$")
+        predicate::str::is_match(r"^oss +\d{4}-\d{2}-\d{2} \(today\)$")
             .unwrap()
             .eval(lines[1]),
         "{stdout}"
     );
     assert!(
-        predicate::str::is_match(r"^personal \(default\) +- +unknown$")
+        predicate::str::is_match(r"^personal \(default\) +unknown$")
             .unwrap()
             .eval(lines[2]),
         "{stdout}"
     );
     assert!(
-        predicate::str::is_match(r"^work +you@company\.com +unknown$")
+        predicate::str::is_match(r"^work +unknown$")
             .unwrap()
             .eval(lines[3]),
         "{stdout}"
@@ -1396,7 +1389,7 @@ fn add(sb: &Sandbox, name: &str) {
 }
 
 #[test]
-fn whoami_shows_the_account_email_and_token() {
+fn whoami_shows_the_account_and_token() {
     let sb = Sandbox::new();
     add(&sb, "work");
     let marker = sb.marker("work", "work\n");
@@ -1405,7 +1398,7 @@ fn whoami_shows_the_account_email_and_token() {
         .assert()
         .success()
         .stdout(predicate::str::starts_with(format!(
-            "work (from {})\n  email:   you@company.com (expected, not verified)\n  token:   stored in the test store at {}, added ",
+            "work (from {})\n  token:   stored in the test store at {}, added ",
             marker.display(),
             sb.store().display()
         )))
@@ -1417,12 +1410,12 @@ fn whoami_shows_the_account_email_and_token() {
 #[test]
 fn whoami_fails_without_a_token() {
     let sb = Sandbox::new();
-    sb.marker("work", "work\n");
+    let marker = sb.marker("work", "work\n");
     sb.cam(&sb.dir("work"))
         .arg("whoami")
         .assert()
         .code(1)
-        .stdout(predicate::str::contains("  email:   you@company.com"))
+        .stdout(format!("work (from {})\n", marker.display()))
         .stderr(format!(
             "cam: no token stored for \"work\" in the test store at {}\nhint: add one with `cam add work`\n",
             sb.store().display()
@@ -1480,9 +1473,7 @@ fn whoami_reports_the_session_and_conflicts() {
 
 #[test]
 fn whoami_warns_about_an_expired_token() {
-    let sb = Sandbox::with_config(Some(
-        "[accounts.work]\nemail = \"you@company.com\"\ntoken_created = 2021-03-01\n",
-    ));
+    let sb = Sandbox::with_config(Some("[accounts.work]\ntoken_created = 2021-03-01\n"));
     sb.store_token("work", TOKEN);
     sb.cam(&sb.root)
         .arg("whoami")
@@ -1494,7 +1485,7 @@ fn whoami_warns_about_an_expired_token() {
         ))
         .stderr(
             "warning: the token for \"work\" has probably expired (around 2022-03-01)\n\
-             hint: run `claude setup-token` signed in as you@company.com, then `cam add work --force`\n",
+             hint: run `claude setup-token` and sign in with the account for work, then `cam add work --force`\n",
         );
 }
 
@@ -1678,7 +1669,9 @@ fn completions_fill_in_account_names() {
     };
     let zsh = script("zsh");
     assert!(zsh.starts_with("#compdef cam\n"), "{zsh}");
-    assert!(zsh.contains(r#"work\:"you@company.com""#), "{zsh}");
+    // `remove` gets the names, `use` the names plus `none`.
+    assert!(zsh.contains(":(personal work)'"), "{zsh}");
+    assert!(zsh.contains("((personal\\:\"\"\nwork\\:\"\"\n"), "{zsh}");
     assert!(
         zsh.contains(r#"none\:"pass-through\: Claude Code'\''s own login""#),
         "{zsh}"
@@ -1689,9 +1682,7 @@ fn completions_fill_in_account_names() {
     assert!(fish.contains("complete -c cam"), "{fish}");
     assert!(fish.contains("__fish_cam_using_subcommand"), "{fish}");
     assert!(
-        fish.contains(
-            "complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'work' -d 'you@company.com'\n"
-        ),
+        fish.contains("complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'work'\n"),
         "{fish}"
     );
     assert!(

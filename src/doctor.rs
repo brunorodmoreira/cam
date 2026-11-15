@@ -172,11 +172,10 @@ impl TokenAge {
 }
 
 /// How to get a new token for `name`.
-pub fn renew_hint(name: &str, email: Option<&str>) -> String {
-    let signed_in = email
-        .map(|email| format!(" signed in as {email}"))
-        .unwrap_or_default();
-    format!("hint: run `claude setup-token`{signed_in}, then `cam add {name} --force`")
+pub fn renew_hint(name: &str) -> String {
+    format!(
+        "hint: run `claude setup-token` and sign in with the account for {name}, then `cam add {name} --force`"
+    )
 }
 
 // --- checks ---
@@ -282,7 +281,7 @@ pub fn account(
         today,
     );
     let line = format!("{subject}: token stored, {}", age.describe(today));
-    let hint = renew_hint(name, account.email.as_deref());
+    let hint = renew_hint(name);
     match age {
         TokenAge::Good { .. } => Check::new(Status::Ok, line),
         TokenAge::Unknown => Check::new(
@@ -497,20 +496,15 @@ mod tests {
     }
 
     #[test]
-    fn renew_hint_names_the_email_when_known() {
+    fn renew_hint_names_the_account() {
         assert_eq!(
-            renew_hint("work", Some("you@company.com")),
-            "hint: run `claude setup-token` signed in as you@company.com, then `cam add work --force`"
-        );
-        assert_eq!(
-            renew_hint("work", None),
-            "hint: run `claude setup-token`, then `cam add work --force`"
+            renew_hint("work"),
+            "hint: run `claude setup-token` and sign in with the account for work, then `cam add work --force`"
         );
     }
 
-    fn account_with(created: Option<Date>, email: Option<&str>) -> Account {
+    fn account_with(created: Option<Date>) -> Account {
         Account {
-            email: email.map(str::to_owned),
             token_created: created.map(|date| Datetime {
                 date: Some(date),
                 time: None,
@@ -524,7 +518,7 @@ mod tests {
         let check = |created, stored| {
             account(
                 "work",
-                &account_with(created, Some("you@company.com")),
+                &account_with(created),
                 stored,
                 "the macOS Keychain",
                 TODAY,

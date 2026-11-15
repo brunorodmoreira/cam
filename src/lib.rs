@@ -50,9 +50,6 @@ enum Command {
     Add {
         /// Account name, matching ^[a-z0-9][a-z0-9_-]*$.
         name: String,
-        /// The email this token is expected to belong to.
-        #[arg(long, value_name = "EMAIL")]
-        email: Option<String>,
         /// Replace a token that is already stored.
         #[arg(long)]
         force: bool,
@@ -62,7 +59,7 @@ enum Command {
         /// The account to remove.
         name: String,
     },
-    /// List accounts, their expected email, token age and the default.
+    /// List accounts, their token age and the default.
     List,
     /// Pin an account to a folder by writing .claude-account.
     Use {
@@ -80,7 +77,7 @@ enum Command {
     },
     /// Show which account applies here, and why.
     Which,
-    /// Show the account that applies here, its expected email and its token.
+    /// Show the account that applies here and its token.
     ///
     /// Checks that the token is stored without reading it, so it never
     /// causes a Keychain prompt.
@@ -185,16 +182,9 @@ fn config_path() -> Result<PathBuf, Error> {
 
 fn dispatch(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Add { name, email, force } => {
+        Command::Add { name, force } => {
             let store = store::open()?;
-            commands::add(
-                &name,
-                email.as_deref(),
-                force,
-                &config_path()?,
-                store.as_ref(),
-                token::read,
-            )
+            commands::add(&name, force, &config_path()?, store.as_ref(), token::read)
         }
         Command::Remove { name } => {
             let store = store::open()?;

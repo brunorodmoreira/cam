@@ -32,9 +32,6 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Account {
-    /// Expected identity. Recorded, not verified: in token mode, Claude Code
-    /// doesn't report whose a token is.
-    pub email: Option<String>,
     pub token_created: Option<Datetime>,
 }
 
@@ -125,15 +122,9 @@ impl Config {
     }
 }
 
-/// Records `name` with `token_created = created`, and `email` if given.
-/// An existing entry keeps its other keys, including its email when `email`
-/// is `None`.
-pub fn add_account(
-    path: &Path,
-    name: &str,
-    email: Option<&str>,
-    created: Date,
-) -> Result<(), Error> {
+/// Records `name` with `token_created = created`. An existing entry is
+/// updated in place, so its comments survive.
+pub fn add_account(path: &Path, name: &str, created: Date) -> Result<(), Error> {
     edit(path, |doc| {
         let accounts = doc.entry("accounts").or_insert_with(|| {
             let mut table = Table::new();
@@ -147,9 +138,6 @@ pub fn add_account(
             accounts.insert(name, Item::Table(table));
         }
         let entry = accounts.get_mut(name)?.as_table_like_mut()?;
-        if let Some(email) = email {
-            entry.insert("email", toml_edit::value(email));
-        }
         let created = Datetime {
             date: Some(created),
             time: None,
@@ -258,7 +246,7 @@ mod tests {
     fn parses_spec_example() {
         let config = parse(
             "default = \"personal\"\n\n\
-             [accounts.work]\nemail = \"you@company.com\"\ntoken_created = 2026-11-11\n\n\
+             [accounts.work]\ntoken_created = 2026-11-11\n\n\
              [accounts.personal]\n",
         )
         .unwrap();
@@ -270,7 +258,6 @@ mod tests {
         assert!(config.has_account("personal"));
         assert!(!config.has_account("oss"));
         let work = &config.accounts["work"];
-        assert_eq!(work.email.as_deref(), Some("you@company.com"));
         assert_eq!(work.token_created.unwrap().to_string(), "2026-11-11");
     }
 
@@ -399,20 +386,9 @@ mod tests {
     fn add_creates_missing_file_and_dirs() {
         let tree = Tree::new();
         let path = tree.root.join("nested/cam/config.toml");
-        add_account(&path, "work", Some("you@company.com"), DAY).unwrap();
-        assert_eq!(
-            read(&path),
-            "[accounts.work]\nemail = \"you@company.com\"\ntoken_created = 2026-11-11\n"
-        );
-        assert!(Config::load(&path).unwrap().has_account("work"));
-    }
-
-    #[test]
-    fn add_without_email() {
-        let tree = Tree::new();
-        let path = tree.root.join("config.toml");
-        add_account(&path, "work", None, DAY).unwrap();
+        add_account(&path, "work", DAY).unwrap();
         assert_eq!(read(&path), "[accounts.work]\ntoken_created = 2026-11-11\n");
+        assert!(Config::load(&path).unwrap().has_account("work"));
     }
 
     #[test]
@@ -420,14 +396,14 @@ mod tests {
         let tree = Tree::new();
         let path = tree.config(
             "# my accounts\ndefault = \"personal\" # most folders\n\n\
-             [accounts.personal]\nemail = \"me@example.com\" # home\n",
+             [accounts.personal]\ntoken_created = 2026-11-02 # home\n",
         );
-        add_account(&path, "work", Some("you@company.com"), DAY).unwrap();
+        add_account(&path, "work", DAY).unwrap();
         assert_eq!(
             read(&path),
             "# my accounts\ndefault = \"personal\" # most folders\n\n\
-             [accounts.personal]\nemail = \"me@example.com\" # home\n\n\
-             [accounts.work]\nemail = \"you@company.com\"\ntoken_created = 2026-11-11\n"
+             [accounts.personal]\ntoken_created = 2026-11-02 # home\n\n\
+             [accounts.work]\ntoken_created = 2026-11-11\n"
         );
     }
 
@@ -435,25 +411,18 @@ mod tests {
     fn add_updates_existing_entry_in_place() {
         let tree = Tree::new();
         let path = tree.config(
-            "[accounts.work]\n# who this should be\nemail = \"old@company.com\"\ntoken_created = 2025-01-01\n\n\
+            "# work stuff\n[accounts.work]\ntoken_created = 2025-01-01\n\n\
              [accounts.personal]\n",
         );
-        add_account(&path, "work", None, DAY).unwrap();
+        add_account(&path, "work", DAY).unwrap();
         let text = read(&path);
         assert!(
-            text.contains("# who this should be\nemail = \"old@company.com\""),
+            text.starts_with("# work stuff\n[accounts.work]\n"),
             "{text}"
         );
         assert!(text.contains("token_created = 2026-11-11"), "{text}");
         assert!(!text.contains("2025-01-01"), "{text}");
-
-        add_account(&path, "work", Some("new@company.com"), DAY).unwrap();
-        let config = Config::load(&path).unwrap();
-        assert_eq!(
-            config.accounts()["work"].email.as_deref(),
-            Some("new@company.com")
-        );
-        assert!(config.has_account("personal"));
+        assert!(Config::load(&path).unwrap().has_account("personal"));
     }
 
     #[test]
@@ -462,7 +431,7 @@ mod tests {
         let broken = "defualt = \"work\"\n";
         let path = tree.config(broken);
         assert!(matches!(
-            add_account(&path, "work", None, DAY),
+            add_account(&path, "work", DAY),
             Err(Error::ParseConfig { .. })
         ));
         assert_eq!(read(&path), broken);
@@ -472,7 +441,7 @@ mod tests {
     fn add_works_with_inline_account_tables() {
         let tree = Tree::new();
         let path = tree.config("accounts = { personal = {} }\n");
-        add_account(&path, "work", None, DAY).unwrap();
+        add_account(&path, "work", DAY).unwrap();
         let config = Config::load(&path).unwrap();
         assert!(config.has_account("personal") && config.has_account("work"));
     }
@@ -480,9 +449,7 @@ mod tests {
     #[test]
     fn remove_deletes_entry_and_clears_default() {
         let tree = Tree::new();
-        let path = tree.config(
-            "default = \"work\"\n\n[accounts.work]\nemail = \"you@company.com\"\n\n[accounts.personal]\n",
-        );
+        let path = tree.config("default = \"work\"\n\n[accounts.work]\n\n[accounts.personal]\n");
         assert_eq!(
             remove_account(&path, "work").unwrap(),
             Removed {
@@ -540,7 +507,7 @@ mod tests {
         let link = tree.dir("home/.config/cam").join("config.toml");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        add_account(&link, "work", None, DAY).unwrap();
+        add_account(&link, "work", DAY).unwrap();
         assert!(
             fs::symlink_metadata(&link)
                 .unwrap()
@@ -556,7 +523,7 @@ mod tests {
         let tree = Tree::new();
         let path = tree.config("[accounts.personal]\n");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        add_account(&path, "work", None, DAY).unwrap();
+        add_account(&path, "work", DAY).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
@@ -569,7 +536,7 @@ mod tests {
         let path = dir.join("config.toml");
         fs::write(&path, "").unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
-        let result = add_account(&path, "work", None, DAY);
+        let result = add_account(&path, "work", DAY);
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(matches!(result, Err(Error::Write { .. })));
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);

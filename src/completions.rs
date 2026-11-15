@@ -69,14 +69,8 @@ fn with_accounts(mut cmd: Command, config: Option<&Config>) -> Command {
         .map(|config| {
             config
                 .accounts()
-                .iter()
-                .map(|(name, account)| {
-                    let value = PossibleValue::new(name.clone());
-                    match account.email.as_deref().filter(|email| is_plain(email)) {
-                        Some(email) => value.help(email.to_owned()),
-                        None => value,
-                    }
-                })
+                .keys()
+                .map(|name| PossibleValue::new(name.clone()))
                 .collect()
         })
         .unwrap_or_default();
@@ -96,15 +90,6 @@ fn with_accounts(mut cmd: Command, config: Option<&Config>) -> Command {
         });
     }
     cmd
-}
-
-/// Whether an email is safe to show as help text in any shell's script.
-/// clap escapes help text, but the config is hand-editable, so anything
-/// unusual is left out rather than trusted to escaping.
-fn is_plain(email: &str) -> bool {
-    email
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "@._%+-".contains(c))
 }
 
 #[cfg(test)]
@@ -143,20 +128,12 @@ mod tests {
     }
 
     #[test]
-    fn fills_in_account_names_and_plain_emails() {
+    fn fills_in_account_names() {
         let tree = Tree::new();
-        let path = tree.config(
-            "[accounts.work]\nemail = \"you@company.com\"\n\
-             [accounts.odd]\nemail = \"a$(b)@c\"\n\
-             [accounts.personal]\n",
-        );
+        let path = tree.config("[accounts.work]\n[accounts.personal]\n");
         let config = Config::load(&path).unwrap();
         let cmd = with_accounts(cli(), Some(&config));
-        let accounts = [
-            ("odd", None),
-            ("personal", None),
-            ("work", Some("you@company.com")),
-        ];
+        let accounts = [("personal", None), ("work", None)];
         assert_eq!(values(&cmd, "remove"), owned(&accounts));
         let mut with_none = accounts.to_vec();
         with_none.push(("none", Some("pass-through: Claude Code's own login")));
@@ -180,14 +157,14 @@ mod tests {
     fn fish_gets_positional_values_quoted() {
         let cmd = Command::new(BIN).subcommand(Command::new("use").arg(
             clap::Arg::new("name").value_parser(PossibleValuesParser::new([
-                PossibleValue::new("work").help("you@company.com"),
+                PossibleValue::new("work").help("some help"),
                 PossibleValue::new("none").help("Claude Code's own"),
                 PossibleValue::new("plain"),
             ])),
         ));
         assert_eq!(
             fish_values(&cmd),
-            "complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'work' -d 'you@company.com'\n\
+            "complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'work' -d 'some help'\n\
              complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'none' -d 'Claude Code\\'s own'\n\
              complete -c cam -n \"__fish_cam_using_subcommand use\" -f -a 'plain'\n"
         );
