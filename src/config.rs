@@ -60,17 +60,9 @@ impl Config {
     }
 
     fn parse(text: &str, path: &Path) -> Result<Self, Error> {
-        let config: Self = toml::from_str(text).map_err(|err| {
-            if is_token_mode(text) {
-                Error::TokenModeConfig {
-                    path: path.to_owned(),
-                }
-            } else {
-                Error::ParseConfig {
-                    path: path.to_owned(),
-                    source: Box::new(err),
-                }
-            }
+        let config: Self = toml::from_str(text).map_err(|err| Error::ParseConfig {
+            path: path.to_owned(),
+            source: Box::new(err),
         })?;
         config.validate(path)?;
         Ok(config)
@@ -106,25 +98,6 @@ impl Config {
             .map(|account| share::normalize(account.share.clone()))
             .unwrap_or_default()
     }
-}
-
-/// Whether `text` is a config from token mode (M1–M6): it has a top-level
-/// `default`, or an account with `token_created`.
-fn is_token_mode(text: &str) -> bool {
-    let Ok(table) = toml::from_str::<toml::Table>(text) else {
-        return false;
-    };
-    let has_token_date = table
-        .get("accounts")
-        .and_then(toml::Value::as_table)
-        .is_some_and(|accounts| {
-            accounts.values().any(|account| {
-                account
-                    .as_table()
-                    .is_some_and(|account| account.contains_key("token_created"))
-            })
-        });
-    table.contains_key("default") || has_token_date
 }
 
 /// Records `name`. An existing entry is left as it is, comments included.
@@ -330,18 +303,6 @@ mod tests {
     }
 
     #[test]
-    fn explains_a_token_mode_config() {
-        for text in [
-            "default = \"work\"\n[accounts.work]\n",
-            "[accounts.work]\ntoken_created = 2026-11-11\n",
-        ] {
-            let err = parse(text).unwrap_err();
-            assert!(matches!(err, Error::TokenModeConfig { .. }), "{text}");
-            assert!(err.to_string().contains("token mode"), "{err}");
-        }
-    }
-
-    #[test]
     fn rejects_invalid_account_names() {
         for key in ["Work", "\"-x\"", "\"a b\""] {
             let err = parse(&format!("[accounts.{key}]\n")).unwrap_err();
@@ -355,8 +316,6 @@ mod tests {
             parse("[accounts.system]\n"),
             Err(Error::InvalidConfigAccount { name, .. }) if name == "system"
         ));
-        // Token mode's reserved name is an ordinary one now.
-        assert!(parse("[accounts.none]\n").unwrap().has_account("none"));
     }
 
     #[test]

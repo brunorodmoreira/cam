@@ -191,11 +191,6 @@ mod tests {
             Selection::parse("work"),
             Some(Selection::Account("work".into()))
         );
-        // Token mode's reserved name is an ordinary one now.
-        assert_eq!(
-            Selection::parse("none"),
-            Some(Selection::Account("none".into()))
-        );
         assert_eq!(Selection::parse("System"), None);
         assert_eq!(Selection::parse("Work"), None);
         assert_eq!(Selection::parse(""), None);
