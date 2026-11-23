@@ -4,14 +4,14 @@ Pick the Claude Code account per folder, the way `.nvmrc` picks a Node version.
 
 Put a `.claude-account` file in a folder. The nearest one up the tree decides which account `claude` starts with. Each account is logged in with Claude Code's own `/login` and stays logged in, so you're signed in to all of them at once.
 
-> **Status: early.** Accounts, logins through Claude Code, sharing parts of your setup with an account, per-folder markers, plain `claude` picking the account, `whoami`, `doctor` and shell completions all work. There's no release yet: install from source. See the [roadmap](#roadmap).
+> **Status: early.** Accounts, logins through Claude Code, sharing parts of your setup with an account, per-folder markers, plain `claude` picking the account, `whoami`, `doctor` and shell completions all work. See the [roadmap](#roadmap).
 
 ## Quick start
 
 The login you already have is `system`: Claude Code's own setup in `~/.claude`. cam leaves it alone, and it's what `claude` uses wherever no marker applies. Add another account next to it:
 
 ```sh
-cargo install --git https://github.com/brunorodmoreira/cam
+brew install brunorodmoreira/tap/cam   # or see Install for other ways
 cam add work                      # Claude Code's login opens in the browser
 cam use work --dir ~/Work         # every folder under ~/Work uses it
 echo 'eval "$(cam init zsh)"' >> ~/.zshrc   # plain `claude` picks the account
@@ -54,13 +54,25 @@ system (from /Users/me/Work/oss/.claude-account)
 
 ## Install
 
-From source, with a recent stable Rust:
+With [Homebrew](https://brew.sh), on macOS or Linux:
 
 ```sh
-cargo install --git https://github.com/brunorodmoreira/cam
+brew install brunorodmoreira/tap/cam
 ```
 
-It isn't on crates.io yet. It will be published as `cam-cli`, because `cam` is taken.
+With the install script, which puts `cam` in `~/.local/bin`, next to Claude Code:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/brunorodmoreira/cam/releases/latest/download/cam-cli-installer.sh | sh
+```
+
+With Rust, from [crates.io](https://crates.io/crates/cam-cli), where it's `cam-cli` because `cam` is taken:
+
+```sh
+cargo install cam-cli
+```
+
+Or download an archive for your platform from the [releases](https://github.com/brunorodmoreira/cam/releases). The binary is called `cam` either way.
 
 ## Usage
 
@@ -261,19 +273,9 @@ work
 ## Platforms
 
 - **macOS:** the target for v1. Claude Code keeps each account's login in the Keychain itself.
-- **Linux:** nothing in cam is macOS-only any more, so it may just work, but it isn't tested.
+- **Linux:** released, and the whole test suite passes there, but cam hasn't been tried in a real Claude Code session on Linux yet. The binaries need glibc 2.35 or newer (Ubuntu 22.04, Debian 12). Reports are welcome.
 - **Windows:** not supported. The launcher relies on Unix `exec` and a symlink.
 - **Shells:** `cam init` writes for bash, zsh and fish. cam resolves when `claude` starts, not through a `cd` hook, so they all behave the same. In another shell, put `~/.local/share/cam/shims` first on `PATH` yourself, after running `cam init bash` once to make the link.
-
-## Upgrading from token mode
-
-Before milestone 7, cam passed a token from `claude setup-token` and kept it in the Keychain. The new build no longer knows those tokens, and it rejects a config that still has `token_created` or `default`. To move over:
-
-1. With the old build, run `cam remove <name>` for each account. That deletes its token from the Keychain. If you've already upgraded, delete each one yourself with `security delete-generic-password -s cam -a <name>`.
-2. Remove any `token_created` and `default` lines left in the config.
-3. With the new build, run `cam add <name>` for each account.
-
-A `none` marker from token mode is now an unknown account name. Replace it with `cam use system`.
 
 ## Roadmap
 
@@ -285,7 +287,7 @@ A `none` marker from token mode is now an unknown account name. Replace it with 
 - [x] 6. Shell completions
 - [x] 7. Native logins: each account is its own Claude Code config folder with its own `/login`
 - [x] 8. Sharing: pick which parts of your setup each account shares, kept in sync with links
-- [ ] 9. A release
+- [x] 9. A release
 
 ## Design
 
