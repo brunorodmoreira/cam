@@ -43,7 +43,20 @@ Observed with CLI 2.1.325 in an empty config dir (2026-11-15):
 - `claude auth status --json` exits 1 when not logged in, and still prints its JSON: `loggedIn: false`, `authMethod: "none"`. So cam reads the JSON whatever the exit code.
 - With `ANTHROPIC_API_KEY` set, it reports `loggedIn: true`, `authMethod: "api_key"` and `apiKeySource: "ANTHROPIC_API_KEY"`, with no email.
 - `claude auth logout` in a dir that never logged in succeeds. Running these leaves `.claude.json`, `.claude.json.lock` and `backups/` in the dir.
-- A `SessionStart` hook saw `CAM_ACTIVE_ACCOUNT`, `CAM_SHIM_DEPTH` and `CLAUDE_CONFIG_DIR` from claude's environment (a logged-out `claude -p` in a scratch config dir). In the CLI's code, the status line command runs through the same runner as hooks, whose environment starts from `process.env`, minus a few of Claude Code's own variables (and, in a scrubbing mode, names and values that look like secrets), plus `CLAUDE_PROJECT_DIR`, `COLUMNS` and `LINES`. So a status line can show `$CAM_ACTIVE_ACCOUNT`; the README has the snippet. Not yet seen in a status line itself *(verify)*.
+- A `SessionStart` hook saw `CAM_ACTIVE_ACCOUNT`, `CAM_SHIM_DEPTH` and `CLAUDE_CONFIG_DIR` from claude's environment (a logged-out `claude -p` in a scratch config dir). In the CLI's code, the status line command runs through the same runner as hooks, whose environment starts from `process.env`, minus a few of Claude Code's own variables (and, in a scrubbing mode, names and values that look like secrets), plus `CLAUDE_PROJECT_DIR`, `COLUMNS` and `LINES`. So a status line can show `$CAM_ACTIVE_ACCOUNT`; the README has the snippet. Seen working in a session on 2026-11-23 (below).
+
+Read in the code of CLI 2.1.330 (2026-11-23), for the file links of the sharing groups:
+- **`settings.json`:** changes made in a session (`/config`, `/model`, permission rules, plugin installs and toggles) go through one update function. For user settings it calls the atomic-write helper with `allowSymlink`: the helper reads the link, writes a temp file and renames it onto the link's target, so the link stays. Without `allowSymlink` the helper refuses a link with an error ("Refusing to write through symlink") instead of replacing it. A newer storage backend writes user settings with a `followAtomic` discipline, whose code wasn't found. It's used only when `CLAUDE_CODE_HOVER_REST` is set, which happens in remote sessions and some background ones *(verify)*.
+- **`keybindings.json` and `CLAUDE.md`:** Claude Code never rewrites these. `/keybindings` and `/memory` create the file only when nothing is at the path (`flag: "wx"`, which also fails on a link), then open `$VISUAL` or `$EDITOR`. So the editor decides whether the link survives. Stock vim (`-u NONE`) wrote through a link and kept it.
+- **`history.jsonl`:** prompts are appended, and appending follows the link. The retention prune skips a file that isn't a regular one ("History retention prune skipped: history.jsonl is not a regular file"), so only sessions of the system login prune the shared history. `claude project purge` rewrites the file, and that path wasn't checked.
+- **`.claude.json`:** its writes pass `allowSymlink` too, though cam doesn't share it.
+
+Observed with CLI 2.1.330 in a session (2026-11-23). A throwaway account was added with `cam add`. Each of the four groups' 15 entries was linked by hand to a scratch copy, not to `~/.claude`.
+- After a session with `/model`, `/config` (theme), `/permissions` (an allow rule saved to user settings) and a `/plugin` install, all 15 entries were still links. The shared `settings.json` had gained `model`, `theme`, `permissions` and `enabledPlugins`, written through the link. Prompts went into the shared `history.jsonl`. The plugin went into the shared `plugins/` and the transcript into the shared `projects/`. The account dir itself gained only `cache/` and `sessions/`.
+- The status line snippet from the README showed the account's name.
+- Zed 1.29 saved `CLAUDE.md` and `keybindings.json` through their links, and kept them.
+- `cam remove` logged the account out, which deleted its Keychain slot. It deleted the dir without following a link: the scratch copies were intact afterwards.
+- Not exercised: an "always allow" answer to a permission prompt (auto mode didn't ask), a plugin update, an auto-update, `claude project purge`, and sessions on the storage backend.
 
 Rejected: the undocumented `CLAUDE_SECURESTORAGE_CONFIG_DIR`, which separates only the credential slot. With a shared `.claude.json`, a refresh merges one account's profile fields into the other's `oauthAccount` without checking `accountUuid`, and so does the org-roles fetch.
 
@@ -103,7 +116,7 @@ cam first passed a long-lived `claude setup-token` token as `CLAUDE_CODE_OAUTH_T
 - **`unshare`** removes the group's links and nothing else, and says exactly what it removed: `work no longer shares settings: removed the links settings.json, plugins, hooks. Your files stay in ~/.claude, and work starts over for these.` A link that was never made, or a real file in its place, is named as skipped.
   - `--copy` replaces each link with a copy of what it pointed to, so the account keeps the current setup and goes its own way from there. Folders are copied recursively without following links inside them. For `history`, it says how much it's about to copy first, since `projects/` can be large.
 - Deleting an account never follows links.
-- **File links are the weak spot.** Folder links hold, because whatever is written inside them lands in the shared folder. A file link (`settings.json`, `keybindings.json`, `CLAUDE.md`, `history.jsonl`) turns into a plain file if Claude Code saves by writing a new file and renaming it over the old one, and sharing then stops without an error. Only two write paths were checked (in the spike notes under Why another one). Before building M8, test the rest: `/config`, "always allow" rules, plugin installs and updates, `/memory` edits, keybinding changes and an auto-update. `doctor` warns when a link has become a file.
+- **File links are the weak spot.** Folder links hold, because whatever is written inside them lands in the shared folder. A file link (`settings.json`, `keybindings.json`, `CLAUDE.md`, `history.jsonl`) turns into a plain file if something saves it by writing a new file and renaming it over the old one, and sharing then stops without an error. Claude Code's own writes keep the links, from a reading of its code and a session with every group linked (in the notes under Why another one). That leaves the user's editor, which `/memory` and `/keybindings` open on `CLAUDE.md` and `keybindings.json` (vim and Zed keep links), and the paths not yet exercised, such as plugin updates and auto-updates. `exec` and `doctor` warn when a link has become a file, so a break shows up at the next launch.
 
 ## Resolution
 
@@ -334,14 +347,14 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 5. `whoami` and `doctor`.
 6. Shell completions.
 7. **Native logins (done 2026-11-15):** an account is an empty config dir with its own login, and shares nothing yet. `add`/`login`/`remove` through `claude auth`, `system` in place of `none`, no `default`, `list`/`whoami`/`doctor` from Claude Code's own record. The Keychain store, the token prompt and `token_created` go.
-8. **Sharing (next):** first, test which write paths keep a file link. Then the four groups, the picker and `--share`, `share` (moving copies aside) and `unshare` (with `--copy`), links topped up on launch with `exec`'s warning, and `doctor`'s link checks.
+8. **Sharing (next):** the file links held in a session (2026-11-23, see the notes under Why another one). To build: the four groups, the picker and `--share`, `share` (moving copies aside) and `unshare` (with `--copy`), links topped up on launch with `exec`'s warning, and `doctor`'s link checks.
 9. A release (cargo-dist / Homebrew tap). Not planned yet.
 
 Later ideas: Linux (the design no longer needs a secret store, so it may just work *(verify)*), and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
 
 ## Open questions
 
-- **Do file links survive every write?** The first step of M8 (see Sharing). If `settings.json` doesn't, the `settings` group may need another approach, or a warning that it can come apart.
+- **Do file links survive every write?** Mostly answered on 2026-11-23: Claude Code's own writes keep them, in its code and in a session, and so do vim and Zed. Still unchecked: plugin updates, auto-updates, `claude project purge`, and sessions on the storage backend that `CLAUDE_CODE_HOVER_REST` turns on. The `exec` and `doctor` warnings cover a break.
 - **Settings without plugins:** sharing `settings` brings `enabledPlugins`, so `plugins/` comes with it. Is a group for plugins alone worth having?
 - **Login lifetime:** does an account that isn't used expire after about a month, while a used one keeps renewing *(verify)*?
 - **Remote Control** in an account dir *(verify)*.
