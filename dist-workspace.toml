@@ -29,3 +29,8 @@ publish-jobs = ["homebrew", "./publish-crates"]
 # that crates.io's trusted publishing exchanges for a short-lived token.
 [dist.github-custom-job-permissions]
 publish-crates = { contents = "read", id-token = "write" }
+
+# Build for Apple Silicon on an Intel runner: GitHub's arm64 macOS runners are
+# short of capacity, and a build that waits 15 minutes for one is cancelled.
+[dist.github-custom-runners]
+aarch64-apple-darwin = { runner = "macos-15-intel", host = "x86_64-apple-darwin" }

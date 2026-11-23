@@ -17,13 +17,20 @@ env:
 
 jobs:
   check:
-    name: ${{ matrix.os }}
+    # The check names, macOS and Linux, are what main's ruleset requires.
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
-        # macOS is the main platform. Linux runs the same tests.
-        os: [macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          # Intel: GitHub's arm64 macOS runners are short of capacity, and a
+          # job that waits 15 minutes for one is cancelled. The tests don't
+          # depend on the processor.
+          - name: macOS
+            runner: macos-15-intel
+          - name: Linux
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       # The tests run `cam init` in a real bash and zsh. macOS has both.
