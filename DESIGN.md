@@ -258,7 +258,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - **Account names are baked in** when the script is generated, as the values of `use` and `login` (plus `system`), and of `remove`, `share` and `unshare`. The group names after `share` and `unshare` are fixed. That's done on a copy of the command used only for generation, so parsing still accepts any name.
 - **Loaded at shell start** by `cam init`, or on their own with `eval "$(cam completions zsh)"` and the like, rather than saved to a file. New accounts appear in the next shell. `eval` rather than `source <(…)`, because macOS's bash 3.2 can't source a process substitution.
 - **Quiet:** a missing or broken config gives a script without names and no error, since this runs at every shell start.
-- **fish:** clap's fish script completes no positional values, so cam appends one `complete` line per value, using the `__fish_cam_using_subcommand` function clap's script defines. Not tried in a real fish *(verify)*.
+- **fish:** clap's fish script completes no positional values, so cam appends one `complete` line per value, using the `__fish_cam_using_subcommand` function clap's script defines. Tried in fish 3.6 on Debian (2026-11-23): `cam init fish | source` put the shim dir first, `complete -C` offered the account and group names with their help, and plain `claude` ran as the folder's account. Since these lines don't know positions, `cam share work <TAB>` offers the account names next to the groups.
 - Tested: in bash 3.2, by calling the completion function with `COMP_WORDS`. In zsh, `cam init zsh` registers `_cam` after `compinit` (in the test suite), and completing was tried through a pseudo-terminal during development.
 - The output is redacted like everything else.
 
@@ -337,6 +337,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - **PATH discovery** and **plain `claude` end to end:** fake `claude` scripts, cam's link earlier on PATH, `argv[0]` really `claude`, and `init` refusing a real `claude` in the shim dir. `init`'s code is run in a real bash 3.2 (`--norc`) and zsh (`-f`, with and without `compinit`): afterwards `claude` resolves to the link and runs the fake `claude` as the folder's account.
 - **`remove`'s question** isn't driven by tests, whose stdin isn't a terminal: they cover the refusal without `--yes`. It was tried by hand through a pseudo-terminal.
 - **`whoami` and `doctor`:** the check logic is unit tested without I/O. End to end, settings files and variables hold fake secrets, and the tests assert that no value is ever printed.
+- **CI:** GitHub Actions runs `cargo fmt --check`, clippy and the tests on macOS and Ubuntu for each push to `main` and each pull request. Ubuntu gets zsh installed for the `cam init` tests. Locally, the suite also passed in a Debian container, as a non-root user: as root, the test that a read-only dir makes a config write fail can't fail.
 - **Manual acceptance:** after `cam add work`, `/status` in a folder marked `work` shows the work account, and outside it shows the system login. The Keychain has the slot named above. Passed 2026-11-15 with two work accounts on Team plans next to a personal Max login: each `/status` showed its own org, with "Enterprise managed settings (remote)" only in the work account. Plain `claude` reaches cam only once the shim dir is on `PATH`, and `doctor` warns until it is. With every group shared, the links are still links after a session: passed 2026-11-23 with links made by hand (see the notes under Why another one).
 
 ## Milestones
@@ -351,7 +352,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 8. **Sharing (done 2026-11-23):** the four groups, the picker and `--share`, `share` (moving copies aside) and `unshare` (with `--copy`), links topped up by every launch and `login` with `exec`'s warning, and `doctor`'s link checks. The file links held in a session first (see the notes under Why another one).
 9. A release (cargo-dist / Homebrew tap). Not planned yet.
 
-Later ideas: Linux (the design no longer needs a secret store, so it may just work *(verify)*), and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
+Later ideas: Linux (the design no longer needs a secret store, and the whole test suite passes on Debian, run by CI too, but no real session has been tried *(verify)*), and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
 
 ## Open questions
 
@@ -360,10 +361,10 @@ Later ideas: Linux (the design no longer needs a secret store, so it may just wo
 - **Login lifetime:** does an account that isn't used expire after about a month, while a used one keeps renewing *(verify)*?
 - **Remote Control** in an account dir *(verify)*.
 - **An exported `CLAUDE_CONFIG_DIR`:** should accounts share from it instead of `~/.claude`? For now they share `~/.claude`, and `doctor` warns.
-- **The org caches token mode left in `~/.claude`:** do system sessions apply them? If not, they can just be deleted.
 - **Logical vs physical cwd:** should the walk-up honour `$PWD` when it points at the current directory, as `pwd -L` does? Then markers above a symlinked folder would apply. M1 uses the physical path.
 - Do the VS Code and JetBrains extensions honour a `claude` on PATH?
 - **Name (settled 2026-11-11):** renamed from `clam` to `cam`. On crates.io, `clam` is a template engine, and [`clam-cli`](https://crates.io/crates/clam-cli) ([jose2kk/clam](https://github.com/jose2kk/clam)) is also a Claude Code profile manager. The crate `cam` is taken by an unrelated camera library, so the package is `cam-cli` and the binary is `cam`. `Cargo.toml` keeps `publish = false` until a release. When Linux support comes, check for a clash with libcamera's `cam` utility.
+- **Answered 2026-11-23:** the org caches token mode left in `~/.claude` (`remote-settings.json`, `policy-limits.json` and their `.signature*`, `.stamp` and `.synced-at` files) were never rewritten by sessions of a personal system login after token mode ended, so they were leftovers. Deleting them, after a backup, is safe.
 - **Decided 2026-11-23, building M8:**
   - Files cam creates in `~/.claude` are 0600 and folders 0700, since they can hold prompts and transcripts.
   - The SHARES column of `list` and the `shares:` line of `whoami` show only once an account shares something, so the common output stays as it was.
