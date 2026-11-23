@@ -26,6 +26,7 @@ use crate::marker::{self, FILE_NAME};
 use crate::redact::redact;
 use crate::resolve;
 use crate::settings;
+use crate::share::{self, Group, Parsed, State, Unlinked};
 use crate::shim::{self, Reaches};
 
 /// Prints a line to stdout, redacted like everything else cam prints.
@@ -47,6 +48,106 @@ fn note(line: impl Display) {
 /// Prints a warning to stderr, redacted.
 fn warn(line: impl Display) {
     eprintln!("warning: {}", redact(&line.to_string()));
+}
+
+/// Whether cam can ask the user: stdin and stderr are both a terminal.
+fn can_ask() -> bool {
+    io::stdin().is_terminal() && io::stderr().is_terminal()
+}
+
+/// Asks a yes-or-no question on the terminal. Only `y` or `yes` is yes.
+fn ask_yes(question: &str) -> Result<bool> {
+    eprint!("{} [y/N] ", redact(question));
+    let mut answer = String::new();
+    io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .context("cannot read the answer")?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+/// The groups a command line names. `none` only for `--share`.
+fn named_groups(args: &[String], none_allowed: bool) -> Result<Vec<Group>, Error> {
+    match share::parse_groups(args)? {
+        Parsed::Groups(groups) => Ok(groups),
+        Parsed::Nothing if none_allowed => Ok(Vec::new()),
+        Parsed::Nothing => Err(Error::NoneNotHere),
+    }
+}
+
+/// Shows the groups on the terminal, `checked` ticked, each with what it
+/// would share today, and returns the ones ticked. `None` if cancelled.
+fn pick_groups(name: &str, home: &Path, checked: &[Group]) -> Result<Option<Vec<Group>>> {
+    let width = Group::ALL
+        .iter()
+        .map(|group| group.name().len())
+        .max()
+        .unwrap_or(0);
+    let items: Vec<String> = Group::ALL
+        .iter()
+        .map(|&group| format!("{:<width$}  {}", group.name(), share::preview(home, group)))
+        .collect();
+    let defaults: Vec<bool> = Group::ALL
+        .iter()
+        .map(|group| checked.contains(group))
+        .collect();
+    tell(format_args!(
+        "What should {name} share with your own setup in ~/.claude? A shared group is the same files for both, \
+         so a change in either account shows up in the other. MCP servers are never shared."
+    ));
+    let picked = dialoguer::MultiSelect::with_theme(&dialoguer::theme::ColorfulTheme::default())
+        .with_prompt("Space ticks, Enter confirms; nothing ticked shares nothing")
+        .items(&items)
+        .defaults(&defaults)
+        // What was picked is said afterwards, in cam's words.
+        .report(false)
+        .interact_on_opt(&dialoguer::console::Term::stderr())
+        .context("cannot show the choice")?;
+    Ok(picked.map(|indexes| indexes.into_iter().map(|index| Group::ALL[index]).collect()))
+}
+
+/// Links `groups` into account `dir`. Fails on the first link that can't
+/// be made.
+fn link_groups(home: &Path, dir: &Path, groups: &[Group]) -> Result<share::TopUp> {
+    let mut result = share::top_up(home, dir, groups);
+    if let Some((entry, source)) = result.failed.pop() {
+        return Err(Error::Link {
+            path: dir.join(entry.name),
+            target: share::shared_path(home, entry),
+            source,
+        }
+        .into());
+    }
+    Ok(result)
+}
+
+/// Before a launch or a login: links whatever `groups` are missing, and
+/// warns about what the account can't share, since the account's own files
+/// are never replaced. Problems are warnings, so the launch goes on.
+fn top_up_links(name: &str, home: &Path, dir: &Path, groups: &[Group]) {
+    if groups.is_empty() {
+        return;
+    }
+    let result = share::top_up(home, dir, groups);
+    for (group, entry, own) in result.own {
+        warn(format_args!(
+            "{name}'s {} is {}, not a link to {}, so {name} doesn't share it\n\
+             hint: run `cam share {name} {group}` to move it aside and link it",
+            entry.name,
+            own.describe(),
+            entry.shared_shown()
+        ));
+    }
+    for (entry, err) in result.failed {
+        warn(format_args!(
+            "cannot link {name}'s {} to {}: {err}",
+            entry.name,
+            entry.shared_shown()
+        ));
+    }
 }
 
 /// A name `add` and `remove` accept: valid, and not `system`.
@@ -232,11 +333,21 @@ fn warn_outranking(name: &str, print_mode: bool) {
     }
 }
 
-/// `cam add`: creates the account dir, runs Claude Code's login in it, and
-/// records the account once Claude Code confirms the login. If anything
-/// fails, it logs out and deletes the dir, so a retry starts clean.
-pub fn add(name: &str, login_args: &[OsString], config_path: &Path) -> Result<()> {
+/// `cam add`: creates the account dir with the links of the groups it
+/// shares, runs Claude Code's login in it, and records the account once
+/// Claude Code confirms the login. If anything fails, it logs out and
+/// deletes the dir without following links, so a retry starts clean.
+pub fn add(
+    name: &str,
+    share_args: &[String],
+    login_args: &[OsString],
+    config_path: &Path,
+) -> Result<()> {
     let name = account_name(name)?;
+    let named = match share_args {
+        [] => None,
+        args => Some(named_groups(args, true)?),
+    };
     // A broken config fails here, before anything is created.
     let config = Config::load(config_path)?;
     let home = home()?;
@@ -247,7 +358,17 @@ pub fn add(name: &str, login_args: &[OsString], config_path: &Path) -> Result<()
     let depth = depth()?;
     let own_exe = own_exe()?;
     let program = real_claude(&own_exe)?;
+    let groups = match named {
+        Some(groups) => groups,
+        None if can_ask() => pick_groups(&name, &home, &[])?
+            .ok_or_else(|| anyhow!("cancelled, so {name} was not added"))?,
+        None => Vec::new(),
+    };
     account::create_dir(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    if let Err(err) = link_groups(&home, &dir, &groups) {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(err.context(format!("{name} was not added")));
+    }
     let target = Target::Account {
         name: &name,
         dir: &dir,
@@ -256,6 +377,7 @@ pub fn add(name: &str, login_args: &[OsString], config_path: &Path) -> Result<()
     let retry = format!("cam add {name}");
     let added = log_in(&program, target, depth, login_args, &retry).and_then(|status| {
         config::add_account(config_path, &name)?;
+        config::set_share(config_path, &name, &groups)?;
         Ok(status)
     });
     match added {
@@ -264,11 +386,17 @@ pub fn add(name: &str, login_args: &[OsString], config_path: &Path) -> Result<()
                 "added {name}: logged in as {}",
                 status.identity()
             ));
+            if !groups.is_empty() {
+                say(format_args!(
+                    "{name} shares {} with ~/.claude",
+                    share::describe(&groups)
+                ));
+            }
             warn_same_account(&name, &status, &config, &home, &program, depth);
             warn_outranking(&name, false);
             let reaches = shim::first_on_path(env::var_os("PATH").as_deref(), &own_exe);
             let shell = Shell::from_env(env::var_os("SHELL").as_deref());
-            for line in next_steps(&name, matches!(reaches, Reaches::Shim(_)), shell) {
+            for line in next_steps(&name, matches!(reaches, Reaches::Shim(_)), shell, &groups) {
                 say(line);
             }
             Ok(())
@@ -284,9 +412,10 @@ pub fn add(name: &str, login_args: &[OsString], config_path: &Path) -> Result<()
 }
 
 /// What to do after `cam add`: pin the account to a folder, send plain
-/// `claude` through cam unless it already goes (`reached`), and expect an
-/// empty setup.
-fn next_steps(name: &str, reached: bool, shell: Option<Shell>) -> Vec<String> {
+/// `claude` through cam unless it already goes (`reached`), share parts of
+/// `~/.claude` if it shares nothing yet, and expect an empty setup for the
+/// rest.
+fn next_steps(name: &str, reached: bool, shell: Option<Shell>, shares: &[Group]) -> Vec<String> {
     let mut steps = vec![(
         format!("cam use {name}"),
         format!("use {name} in this folder and the ones below it (or pass --dir)"),
@@ -296,6 +425,12 @@ fn next_steps(name: &str, reached: bool, shell: Option<Shell>) -> Vec<String> {
         steps.push((
             line.to_owned(),
             format!("at the end of {file}, so plain `claude` picks the account"),
+        ));
+    }
+    if shares.is_empty() {
+        steps.push((
+            format!("cam share {name}"),
+            "share your settings, CLAUDE.md, skills or history with it".to_owned(),
         ));
     }
     let width = steps
@@ -310,9 +445,15 @@ fn next_steps(name: &str, reached: bool, shell: Option<Shell>) -> Vec<String> {
             .map(|(command, what)| format!("  {command:<width$}  {what}")),
     );
     lines.push(String::new());
-    lines.push(format!(
-        "{name} starts with an empty Claude Code setup of its own: its first session shows the first-run screens, and your settings, CLAUDE.md, skills and MCP servers in ~/.claude aren't there."
-    ));
+    lines.push(match shares {
+        [] => format!(
+            "{name} starts with an empty Claude Code setup of its own: its first session shows the first-run screens, and your settings, CLAUDE.md, skills and MCP servers in ~/.claude aren't there."
+        ),
+        _ => format!(
+            "Apart from {}, {name} starts with an empty Claude Code setup of its own: its first session shows the first-run screens, and your MCP servers aren't there.",
+            share::describe(shares)
+        ),
+    });
     lines
 }
 
@@ -358,8 +499,12 @@ pub fn login(name: Option<&str>, login_args: &[OsString], config_path: &Path) ->
         (Selection::Account(name), Some(dir)) => Target::Account { name, dir },
         _ => Target::System,
     };
-    // The config only matters for naming the other accounts here.
+    // Past this point the config only matters for the links and for naming
+    // the other accounts.
     let config = Config::load(config_path).ok();
+    if let (Selection::Account(name), Some(dir), Some(config)) = (&selection, &dir, &config) {
+        top_up_links(name, &home, dir, &config.shares(name));
+    }
     before_login(&selection.to_string(), config.as_ref(), &home);
     let retry = format!("cam login {selection}");
     let status = log_in(&program, target, depth, login_args, &retry)?;
@@ -379,6 +524,232 @@ pub fn login(name: Option<&str>, login_args: &[OsString], config_path: &Path) ->
     }
     warn_outranking(&selection.to_string(), false);
     Ok(())
+}
+
+/// The configured account `name` and its dir, which must exist.
+fn existing_account(name: &str, config: &Config, home: &Path) -> Result<PathBuf> {
+    known_account(name, config)?;
+    let dir = account::dir(home, name);
+    if !dir.is_dir() {
+        return Err(Error::NoAccountDir {
+            name: name.to_owned(),
+            dir,
+        }
+        .into());
+    }
+    Ok(dir)
+}
+
+/// `cam share`: links the groups into the account's dir and records them.
+/// The account's own copies where the links go are moved aside, after
+/// asking, and never deleted. Without groups, shows the choice on the
+/// terminal, where unticking a group stops sharing it.
+pub fn share(name: &str, group_args: &[String], yes: bool, config_path: &Path) -> Result<()> {
+    let name = account_name(name)?;
+    let named = match group_args {
+        [] => None,
+        args => Some(named_groups(args, false)?),
+    };
+    let config = Config::load(config_path)?;
+    let home = home()?;
+    let dir = existing_account(&name, &config, &home)?;
+    let current = config.shares(&name);
+    // What it will share, and the groups whose links to make.
+    let (wanted, to_link) = match named {
+        Some(groups) => (
+            share::normalize([current.clone(), groups.clone()].concat()),
+            groups,
+        ),
+        None if can_ask() => {
+            let picked = pick_groups(&name, &home, &current)?
+                .ok_or_else(|| anyhow!("cancelled, so nothing changed"))?;
+            (picked.clone(), picked)
+        }
+        None => return Err(Error::ShareNeedsGroups { name }.into()),
+    };
+    let dropped: Vec<Group> = current
+        .iter()
+        .copied()
+        .filter(|group| !wanted.contains(group))
+        .collect();
+
+    let own: Vec<share::Entry> = share::states(&home, &dir, &to_link)
+        .into_iter()
+        .filter_map(|(_, entry, state)| matches!(state, State::Own(_)).then_some(entry))
+        .collect();
+    let today = date::today().to_string();
+    if !own.is_empty() && !yes {
+        let shown: Vec<String> = own.iter().map(|entry| entry.shown()).collect();
+        let entries = share::and_list(&shown.iter().map(String::as_str).collect::<Vec<_>>());
+        if !can_ask() {
+            return Err(Error::ShareUnconfirmed { name, entries }.into());
+        }
+        let (it, its) = match own.len() {
+            1 => ("it", "its name"),
+            _ => ("them", "their names"),
+        };
+        tell(format_args!(
+            "{name} has its own {entries}, so sharing moves {it} aside: it adds .before-share-{today} to {its}, in {name}'s dir. Nothing is deleted."
+        ));
+        ensure!(
+            ask_yes(&format!("Move {it} aside and share?"))?,
+            "nothing changed"
+        );
+    }
+    let mut moved = Vec::new();
+    for entry in own {
+        let to = share::move_aside(&dir, entry, &today)
+            .with_context(|| format!("cannot move {name}'s {} aside", entry.name))?;
+        moved.push((entry, to));
+    }
+    let linked = link_groups(&home, &dir, &to_link)?.linked;
+    let mut unshared = Vec::new();
+    for &group in &dropped {
+        unshared.extend(unlink_group(&name, &home, &dir, group, false)?);
+    }
+    if wanted != current {
+        config::set_share(config_path, &name, &wanted)?;
+    }
+
+    let added: Vec<Group> = wanted
+        .iter()
+        .copied()
+        .filter(|group| !current.contains(group))
+        .collect();
+    if !added.is_empty() {
+        say(format_args!(
+            "{name} now shares {} with ~/.claude",
+            share::describe(&added)
+        ));
+    } else if dropped.is_empty() && moved.is_empty() && linked.is_empty() {
+        match to_link.as_slice() {
+            [] => say(format_args!("{name} shares nothing, as before")),
+            _ => say(format_args!(
+                "{name} already shares {}",
+                share::describe(&to_link)
+            )),
+        }
+    } else if !linked.is_empty() {
+        let names: Vec<&str> = linked.iter().map(|entry| entry.name).collect();
+        say(format_args!(
+            "{name} shares {} again: linked {}",
+            share::describe(&to_link),
+            names.join(", ")
+        ));
+    }
+    for (entry, to) in &moved {
+        say(format_args!(
+            "moved {name}'s own {} aside, to {}",
+            entry.shown(),
+            to.display()
+        ));
+    }
+    if !moved.is_empty() {
+        note(
+            "nothing was deleted: copy what you want to keep from these into ~/.claude, then delete them",
+        );
+    }
+    for line in unshared {
+        say(line);
+    }
+    Ok(())
+}
+
+/// `cam unshare`: removes the groups' links from the account's dir, and
+/// nothing else, then records that it no longer shares them. With `copy`,
+/// each link is replaced with a copy of what it pointed to.
+pub fn unshare(name: &str, group_args: &[String], copy: bool, config_path: &Path) -> Result<()> {
+    let name = account_name(name)?;
+    let groups = named_groups(group_args, false)?;
+    let config = Config::load(config_path)?;
+    known_account(&name, &config)?;
+    let current = config.shares(&name);
+    let (shared, not_shared): (Vec<Group>, Vec<Group>) =
+        groups.iter().partition(|group| current.contains(group));
+    if shared.is_empty() {
+        return Err(Error::NotShared {
+            groups: share::describe(&groups),
+            shares: share::describe(&current),
+            name,
+        }
+        .into());
+    }
+    let home = home()?;
+    let dir = account::dir(&home, &name);
+    let has_dir = dir.is_dir();
+    if copy && has_dir && shared.contains(&Group::History) {
+        let bytes: u64 = Group::History
+            .entries()
+            .iter()
+            .filter(|&&entry| share::state(&home, &dir, entry) == State::Linked)
+            .map(|&entry| share::size(&share::shared_path(&home, entry)))
+            .sum();
+        tell(format_args!(
+            "Copying {} of history into {}...",
+            share::human_size(bytes),
+            dir.display()
+        ));
+    }
+    let mut lines = Vec::new();
+    for &group in &shared {
+        match has_dir {
+            true => lines.extend(unlink_group(&name, &home, &dir, group, copy)?),
+            false => lines.push(format!(
+                "{name} no longer shares {group} (it has no dir, so there were no links)"
+            )),
+        }
+    }
+    let left: Vec<Group> = current
+        .iter()
+        .copied()
+        .filter(|group| !shared.contains(group))
+        .collect();
+    config::set_share(config_path, &name, &left)?;
+    for line in lines {
+        say(line);
+    }
+    for group in not_shared {
+        note(format_args!("{name} didn't share {group}"));
+    }
+    Ok(())
+}
+
+/// Unlinks every entry of `group` in account `dir`, with a copy in each
+/// link's place if `copy`, and returns the lines that say what happened.
+fn unlink_group(
+    name: &str,
+    home: &Path,
+    dir: &Path,
+    group: Group,
+    copy: bool,
+) -> Result<Vec<String>> {
+    let (mut done, mut skipped) = (Vec::new(), Vec::new());
+    for &entry in group.entries() {
+        let unlinked = share::unlink(home, dir, entry, copy)
+            .with_context(|| format!("cannot unlink {name}'s {}", entry.name))?;
+        match unlinked {
+            Unlinked::Removed | Unlinked::Copied => done.push(entry.name),
+            Unlinked::Skipped(State::Own(own)) => skipped.push(format!(
+                "skipped {name}'s {}: it's {} of its own, not a link",
+                entry.name,
+                own.describe()
+            )),
+            Unlinked::Skipped(_) => {}
+        }
+    }
+    let mut lines = vec![match (done.is_empty(), copy) {
+        (true, _) => format!("{name} no longer shares {group}: it had no links to remove"),
+        (false, false) => format!(
+            "{name} no longer shares {group}: removed the links {}. Your files stay in ~/.claude, and {name} starts over for these.",
+            done.join(", ")
+        ),
+        (false, true) => format!(
+            "{name} no longer shares {group}: replaced the links {} with copies of what they pointed to. ~/.claude is unchanged, and {name} goes its own way from here.",
+            done.join(", ")
+        ),
+    }];
+    lines.extend(skipped);
+    Ok(lines)
 }
 
 /// Fails unless `name` is configured, with a hint that names a close
@@ -413,7 +784,7 @@ pub fn remove(name: &str, yes: bool, config_path: &Path) -> Result<()> {
         return Err(Error::NothingToRemove { name, hint }.into());
     }
     if has_dir && !yes {
-        confirm_remove(&name, &dir)?;
+        confirm_remove(&name, &dir, &config.shares(&name))?;
     }
     if has_dir {
         let logged_out = depth().map_err(anyhow::Error::from).and_then(|depth| {
@@ -464,28 +835,25 @@ pub fn remove(name: &str, yes: bool, config_path: &Path) -> Result<()> {
 
 /// Asks on the terminal before deleting an account dir. Without a
 /// terminal, fails: `--yes` is how a script says yes.
-fn confirm_remove(name: &str, dir: &Path) -> Result<()> {
-    let stdin = io::stdin();
-    if !(stdin.is_terminal() && io::stderr().is_terminal()) {
+fn confirm_remove(name: &str, dir: &Path, shares: &[Group]) -> Result<()> {
+    if !can_ask() {
         return Err(Error::Unconfirmed {
             name: name.to_owned(),
         }
         .into());
     }
+    let what = match shares {
+        [] => "with its transcripts, memory, settings and MCP servers".to_owned(),
+        _ => format!(
+            "with all it doesn't share, such as its MCP servers. What it shares ({}) stays in ~/.claude",
+            share::describe(shares)
+        ),
+    };
     tell(format_args!(
-        "This logs {name} out and deletes {}, with its transcripts, memory, settings and MCP servers.",
+        "This logs {name} out and deletes {}, {what}.",
         dir.display()
     ));
-    eprint!("Remove {name}? [y/N] ");
-    let mut answer = String::new();
-    stdin
-        .lock()
-        .read_line(&mut answer)
-        .context("cannot read the answer")?;
-    ensure!(
-        matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
-        "nothing was removed"
-    );
+    ensure!(ask_yes(&format!("Remove {name}?"))?, "nothing was removed");
     Ok(())
 }
 
@@ -501,10 +869,10 @@ pub fn list(config_path: &Path) -> Result<()> {
             .find(|(other, _)| other == name)
             .map(|(_, email)| email.clone())
     };
-    let accounts: Vec<(String, Option<String>)> = config
+    let accounts: Vec<(String, Option<String>, Vec<Group>)> = config
         .accounts()
         .keys()
-        .map(|name| (name.clone(), email(name)))
+        .map(|name| (name.clone(), email(name), config.shares(name)))
         .collect();
     for line in list_lines(email(SYSTEM), &accounts) {
         say(line);
@@ -512,23 +880,44 @@ pub fn list(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn list_lines(system: Option<String>, accounts: &[(String, Option<String>)]) -> Vec<String> {
-    let mut rows = vec![("ACCOUNT".to_owned(), "EMAIL".to_owned())];
-    rows.push((SYSTEM.to_owned(), system.unwrap_or_else(|| "-".to_owned())));
-    for (name, email) in accounts {
+/// The rows of `cam list`. The SHARES column shows only once an account
+/// shares something.
+fn list_lines(
+    system: Option<String>,
+    accounts: &[(String, Option<String>, Vec<Group>)],
+) -> Vec<String> {
+    let dash = || "-".to_owned();
+    let mut rows = vec![(
+        "ACCOUNT".to_owned(),
+        "EMAIL".to_owned(),
+        "SHARES".to_owned(),
+    )];
+    rows.push((SYSTEM.to_owned(), system.unwrap_or_else(dash), dash()));
+    for (name, email, shares) in accounts {
+        let shares: Vec<&str> = shares.iter().map(|group| group.name()).collect();
         rows.push((
             name.clone(),
-            email.clone().unwrap_or_else(|| "-".to_owned()),
+            email.clone().unwrap_or_else(dash),
+            match shares.as_slice() {
+                [] => dash(),
+                shares => shares.join(", "),
+            },
         ));
     }
-    let width = rows
-        .iter()
-        .map(|(name, _)| name.chars().count())
-        .max()
-        .unwrap_or(0);
+    let sharing = accounts.iter().any(|(_, _, shares)| !shares.is_empty());
+    let width = |column: fn(&(String, String, String)) -> &String| {
+        rows.iter()
+            .map(|row| column(row).chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let (name_width, email_width) = (width(|row| &row.0), width(|row| &row.1));
     let mut lines: Vec<String> = rows
         .iter()
-        .map(|(name, email)| format!("{name:<width$}  {email}"))
+        .map(|(name, email, shares)| match sharing {
+            true => format!("{name:<name_width$}  {email:<email_width$}  {shares}"),
+            false => format!("{name:<name_width$}  {email}"),
+        })
         .collect();
     if accounts.is_empty() {
         lines.push(String::new());
@@ -608,6 +997,14 @@ pub fn whoami(config_path: &Path) -> Result<()> {
         say("  login:   not logged in");
         failed = true;
     }
+    if let Selection::Account(account) = &resolution.selection {
+        let shares = Config::load(config_path)
+            .map(|config| config.shares(account))
+            .unwrap_or_default();
+        if !shares.is_empty() {
+            say(format_args!("  shares:  {}", share::describe(&shares)));
+        }
+    }
     if let Some(active) = env_set(ENV_ACTIVE) {
         say(format_args!(
             "  session: this shell is inside a `claude` that cam started as {}",
@@ -684,6 +1081,10 @@ pub fn doctor(config_path: &Path) -> Result<()> {
             };
             note_email(name, &login);
             checks.push(doctor::account(name, &dir, dir_exists, &login, today));
+            if dir_exists {
+                let states = share::states(home, &dir, &config.shares(name));
+                checks.extend(doctor::links(name, &states, &share::set_aside(&dir)));
+            }
         }
     }
     checks.extend(doctor::same_account(&emails));
@@ -748,6 +1149,10 @@ pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
                 }
                 .into());
             }
+            let shares = Config::load(config_path)
+                .map(|config| config.shares(name))
+                .unwrap_or_default();
+            top_up_links(name, &home()?, &dir, &shares);
             warn_outranking(name, print_mode(args));
             Target::Account { name, dir: &dir }
         }
@@ -896,9 +1301,9 @@ fn expand_home(path: &Path, home: Option<&Path>) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn accounts(list: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+    fn accounts(list: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>, Vec<Group>)> {
         list.iter()
-            .map(|(name, email)| ((*name).to_owned(), email.map(str::to_owned)))
+            .map(|(name, email)| ((*name).to_owned(), email.map(str::to_owned), Vec::new()))
             .collect()
     }
 
@@ -934,6 +1339,41 @@ mod tests {
                 "x         -",
             ]
         );
+    }
+
+    #[test]
+    fn list_shows_shares_once_an_account_shares_something() {
+        let mut list = accounts(&[("personal", Some("me@home.org")), ("work", None)]);
+        list[1].2 = vec![Group::Settings, Group::Skills];
+        assert_eq!(
+            list_lines(None, &list),
+            [
+                "ACCOUNT   EMAIL        SHARES",
+                "system    -            -",
+                "personal  me@home.org  -",
+                "work      -            settings, skills",
+            ]
+        );
+    }
+
+    #[test]
+    fn next_steps_offer_sharing_until_the_account_shares() {
+        let none = next_steps("work", true, None, &[]).join("\n");
+        assert!(
+            none.contains(
+                "  cam share work  share your settings, CLAUDE.md, skills or history with it"
+            ),
+            "{none}"
+        );
+        assert!(
+            none.contains(
+                "your settings, CLAUDE.md, skills and MCP servers in ~/.claude aren't there"
+            ),
+            "{none}"
+        );
+        let some = next_steps("work", true, None, &[Group::Settings, Group::Skills]).join("\n");
+        assert!(!some.contains("cam share"), "{some}");
+        assert!(some.contains("Apart from settings and skills, work starts with an empty Claude Code setup of its own"), "{some}");
     }
 
     #[test]

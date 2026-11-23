@@ -11,6 +11,7 @@ use crate::account::{self, NAME_RULE};
 use crate::discover::ENV_CLAUDE_BIN;
 use crate::launch::ENV_DEPTH;
 use crate::resolve::Origin;
+use crate::share;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -178,6 +179,60 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+
+    #[error("unknown group \"{name}\"\nhint: {hint}")]
+    UnknownGroup { name: String, hint: String },
+
+    #[error(
+        "no group named\nhint: the groups are {}, or `all`",
+        share::group_list()
+    )]
+    NoGroups,
+
+    #[error("`none` can't go with other groups")]
+    NoneWithGroups,
+
+    #[error(
+        "`none` is only for `cam add --share`\nhint: to stop sharing, run `cam unshare <name> <group>…`"
+    )]
+    NoneNotHere,
+
+    #[error(
+        "no group named, and there's no terminal to show the choice on\n\
+         hint: name them, as in `cam share {name} settings`, or `all`"
+    )]
+    ShareNeedsGroups { name: String },
+
+    #[error(
+        "{name} has its own {entries}, which sharing moves aside, and there's no terminal to ask first\n\
+         hint: pass --yes to go ahead; nothing is deleted"
+    )]
+    ShareUnconfirmed { name: String, entries: String },
+
+    #[error("{name} doesn't share {groups}\nhint: {name} shares {shares}")]
+    NotShared {
+        name: String,
+        groups: String,
+        shares: String,
+    },
+
+    #[error("cannot link {} to {}", path.display(), target.display())]
+    Link {
+        path: PathBuf,
+        target: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+impl From<share::BadGroups> for Error {
+    fn from(bad: share::BadGroups) -> Self {
+        match bad {
+            share::BadGroups::Empty => Self::NoGroups,
+            share::BadGroups::NoneWithGroups => Self::NoneWithGroups,
+            share::BadGroups::Unknown { name, hint } => Self::UnknownGroup { name, hint },
+        }
+    }
 }
 
 /// "\nhint: try `work`", for an invalid name that has a valid one close by.

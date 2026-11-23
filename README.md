@@ -4,7 +4,7 @@ Pick the Claude Code account per folder, the way `.nvmrc` picks a Node version.
 
 Put a `.claude-account` file in a folder. The nearest one up the tree decides which account `claude` starts with. Each account is logged in with Claude Code's own `/login` and stays logged in, so you're signed in to all of them at once.
 
-> **Status: early.** Accounts, logins through Claude Code, per-folder markers, plain `claude` picking the account, `whoami`, `doctor` and shell completions all work. Each account has its own Claude Code setup for now: sharing your settings, skills and history with an account comes next. There's no release yet: install from source. See the [roadmap](#roadmap).
+> **Status: early.** Accounts, logins through Claude Code, sharing parts of your setup with an account, per-folder markers, plain `claude` picking the account, `whoami`, `doctor` and shell completions all work. There's no release yet: install from source. See the [roadmap](#roadmap).
 
 ## Quick start
 
@@ -17,7 +17,7 @@ cam use work --dir ~/Work         # every folder under ~/Work uses it
 echo 'eval "$(cam init zsh)"' >> ~/.zshrc   # plain `claude` picks the account
 ```
 
-Open a new terminal, and `claude` under `~/Work` runs as `work`, anywhere else as `system`. A new account starts with an empty Claude Code setup: its first session shows Claude Code's first-run screens, and your settings, CLAUDE.md, skills and MCP servers aren't in it.
+Open a new terminal, and `claude` under `~/Work` runs as `work`, anywhere else as `system`. `cam add` asks which parts of your own setup the new account should share: your settings, CLAUDE.md, skills or history (see [What an account shares](#what-an-account-shares)). The rest starts empty: its first session shows Claude Code's first-run screens, and your MCP servers aren't in it.
 
 ## Why
 
@@ -80,7 +80,7 @@ work     you@company.com
 
 The login uses whichever claude.ai account the browser is signed in to, so switch accounts there first if needed. Arguments after `--` go to `claude auth login`: `cam add work -- --email you@company.com` fills in the email, and `-- --sso` forces single sign-on. Accounts need a Claude subscription (Pro, Max, Team or Enterprise). A Console login is refused, because Claude Code keeps it outside the account's folder.
 
-After the login, `add` prints the next steps. If the login fails or you cancel it, cam logs the half-made account out and deletes its folder, so you can just try again. If the new account turns out to be the same claude.ai account as `system` or another account (same email, same org), cam warns: the browser was probably still signed in to it.
+Before the login, on a terminal, `add` asks what the account should share; `--share settings,skills` or `--share none` answers up front, and without a terminal it shares nothing. After the login, `add` prints the next steps. If the login fails or you cancel it, cam logs the half-made account out and deletes its folder, so you can just try again. If the new account turns out to be the same claude.ai account as `system` or another account (same email, same org), cam warns: the browser was probably still signed in to it.
 
 Then pin accounts to folders:
 
@@ -170,7 +170,7 @@ cam sets `CAM_ACTIVE_ACCOUNT` in the environment of the `claude` it starts, and 
 }
 ```
 
-Each account has its own `settings.json` for now, at `~/.local/share/cam/accounts/<name>/settings.json`, and `system`'s is `~/.claude/settings.json`. If you already have a status line script, have it print `${CAM_ACTIVE_ACCOUNT:-system}` too.
+`system`'s is `~/.claude/settings.json`. An account that shares `settings` uses that same file, so one status line covers them all. Otherwise the account's own is `~/.local/share/cam/accounts/<name>/settings.json`. If you already have a status line script, have it print `${CAM_ACTIVE_ACCOUNT:-system}` too.
 
 ### Shell completions
 
@@ -190,7 +190,7 @@ cam completions fish | source     # ~/.config/fish/config.fish
 cam remove work
 ```
 
-It asks first, since everything in the account's folder goes, including its transcripts and memory. `--yes` skips the question, and scripts need it. Then it logs the account out, so its login doesn't stay behind in the Keychain, and deletes its folder and its config entry. If the logout fails, nothing is deleted. A `.claude-account` that still names the account then makes `claude` stop with an error until you change it.
+It asks first, since everything in the account's folder goes, including its transcripts and memory, unless it shares them: what it shares stays in `~/.claude`. `--yes` skips the question, and scripts need it. Then it logs the account out, so its login doesn't stay behind in the Keychain, and deletes its folder and its config entry. If the logout fails, nothing is deleted. A `.claude-account` that still names the account then makes `claude` stop with an error until you change it.
 
 ### The config file
 
@@ -198,6 +198,7 @@ Accounts live in `~/.config/cam/config.toml`, or wherever `$CAM_CONFIG` points. 
 
 ```toml
 [accounts.work]
+share = ["settings", "skills"]
 
 [accounts.personal]
 ```
@@ -217,9 +218,32 @@ If `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` is set, Claude Code uses 
 
 ## What an account shares
 
-Nothing, for now. A new account starts with an empty Claude Code setup and goes through Claude Code's first-run screens once. Its settings, plugins, skills, CLAUDE.md, MCP servers, transcripts and memory are its own.
+Nothing, unless you choose. An account can share groups of your own setup in `~/.claude`, through links in its folder. A shared group is the same files for both, so a change in either account shows up in the other.
 
-Next, cam will let each account share groups of your setup in `~/.claude`, kept in sync with links: settings (with plugins and hooks), instructions, skills (with agents and commands), and history. MCP servers stay per account: add them with `CAM_ACCOUNT=work claude mcp add …`. See [DESIGN.md](DESIGN.md#sharing-m8).
+| Group | Links | Covers |
+|---|---|---|
+| `settings` | `settings.json`, `keybindings.json`, `plugins/`, `hooks/` | permissions, hooks, model, theme, status line, plugins |
+| `instructions` | `CLAUDE.md`, `rules/` | your global instructions |
+| `skills` | `skills/`, `agents/`, `commands/`, `output-styles/` | your own skills, agents, slash commands and output styles |
+| `history` | `projects/`, `history.jsonl`, `file-history/`, `todos/`, `plans/` | transcripts, `/resume`, auto memory, prompt history |
+
+```sh
+cam add work --share settings,skills   # or answer when cam asks
+cam share work history                 # share more later
+cam share work                         # tick and untick, on a terminal
+cam unshare work history               # stop: removes the links, your files stay
+cam unshare work settings --copy       # stop, and keep a copy of the current files
+```
+
+Groups go comma-separated or as separate words, and `all` is every group. `cam list` and `cam whoami` show what each account shares.
+
+Sharing goes both ways, so choose with that in mind. With `settings`, the same hooks and plugins run in both accounts. With `history`, work transcripts and memory sit next to personal ones in `~/.claude/projects`. An org's managed settings and policy caches always stay in its own account.
+
+MCP servers are never shared: Claude Code keeps them in `.claude.json`, next to the login. Add them per account with `CAM_ACCOUNT=work claude mcp add -s user …`, or get them from a plugin in a shared `settings`. Each account also goes through Claude Code's first-run screens once.
+
+When an account already has its own copy of something it starts to share, such as its own `settings.json`, `cam share` asks, then renames it to `settings.json.before-share-<date>`. Nothing is deleted: copy what you want from it into `~/.claude`. `cam doctor` lists these copies until you delete them.
+
+Every launch adds missing links, and never replaces a real file. If something saved a shared file by replacing it, cam says so at launch, and `cam share work settings` links it again. Claude Code's own writes keep the links (checked with version 2.1.330), and so do saves from vim and Zed. `cam doctor` checks each link.
 
 ## The marker file
 
@@ -260,7 +284,7 @@ A `none` marker from token mode is now an unknown account name. Replace it with 
 - [x] 5. `whoami` and `doctor`
 - [x] 6. Shell completions
 - [x] 7. Native logins: each account is its own Claude Code config folder with its own `/login`
-- [ ] 8. Sharing: pick which parts of your setup each account shares, kept in sync with links
+- [x] 8. Sharing: pick which parts of your setup each account shares, kept in sync with links
 - [ ] 9. A release
 
 ## Design

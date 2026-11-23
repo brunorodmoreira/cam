@@ -17,6 +17,7 @@ mod marker;
 mod redact;
 mod resolve;
 mod settings;
+mod share;
 mod shim;
 #[cfg(test)]
 mod testutil;
@@ -63,11 +64,17 @@ enum Command {
     /// The account gets its own Claude Code config dir, under
     /// ~/.local/share/cam/accounts. cam runs `claude auth login` in it, so
     /// you pick the account in the browser, as with `/login`. The account
-    /// starts with an empty setup: none of your settings, CLAUDE.md, skills
-    /// or MCP servers.
+    /// starts with an empty setup, apart from the parts of your own setup
+    /// in ~/.claude it shares: on a terminal, cam asks which, unless
+    /// --share says. MCP servers are never shared.
     Add {
         /// Account name: lowercase letters, digits, `-` and `_`, like `work`.
         name: String,
+        /// What to share with ~/.claude: settings, instructions, skills,
+        /// history, `all` or `none`. Comma-separated or repeated. Without
+        /// it, cam asks on a terminal, and shares nothing otherwise.
+        #[arg(long, value_name = "GROUPS")]
+        share: Vec<String>,
         /// After `--`, arguments for `claude auth login`: `--email <address>`
         /// fills in the email, `--sso` forces single sign-on.
         #[arg(last = true, value_name = "LOGIN_ARGS")]
@@ -83,6 +90,40 @@ enum Command {
         /// After `--`, arguments for `claude auth login`, as for `add`.
         #[arg(last = true, value_name = "LOGIN_ARGS")]
         login_args: Vec<OsString>,
+    },
+    /// Share parts of your own setup in ~/.claude with an account.
+    ///
+    /// The groups: settings (settings.json, keybindings.json, plugins/,
+    /// hooks/), instructions (CLAUDE.md, rules/), skills (skills/, agents/,
+    /// commands/, output-styles/) and history (projects/, history.jsonl,
+    /// file-history/, todos/, plans/). A shared group is the same files for
+    /// both: a change in either shows up in the other. The account's own
+    /// copies are moved aside, never deleted. Without groups, cam shows the
+    /// choice on a terminal.
+    Share {
+        /// The account.
+        name: String,
+        /// Groups to share: settings, instructions, skills, history, or `all`.
+        #[arg(value_name = "GROUP")]
+        groups: Vec<String>,
+        /// Move the account's own copies aside without asking.
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Stop sharing parts of ~/.claude with an account.
+    ///
+    /// Removes the group's links and nothing else: your files stay in
+    /// ~/.claude, and the account starts over for these. With --copy, the
+    /// account keeps a copy of them instead.
+    Unshare {
+        /// The account.
+        name: String,
+        /// Groups to stop sharing, or `all`.
+        #[arg(value_name = "GROUP", required = true)]
+        groups: Vec<String>,
+        /// Replace each link with a copy of what it points to.
+        #[arg(long)]
+        copy: bool,
     },
     /// Log an account out and delete it, with its transcripts and memory.
     ///
@@ -247,7 +288,17 @@ fn config_path() -> Result<PathBuf, Error> {
 
 fn dispatch(command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Add { name, login_args } => commands::add(&name, &login_args, &config_path()?),
+        Command::Add {
+            name,
+            share,
+            login_args,
+        } => commands::add(&name, &share, &login_args, &config_path()?),
+        Command::Share { name, groups, yes } => {
+            commands::share(&name, &groups, yes, &config_path()?)
+        }
+        Command::Unshare { name, groups, copy } => {
+            commands::unshare(&name, &groups, copy, &config_path()?)
+        }
         Command::Login { name, login_args } => {
             commands::login(name.as_deref(), &login_args, &config_path()?)
         }

@@ -1,6 +1,6 @@
 # cam — Claude Account Manager
 
-Status: milestones 1–7 built. Accounts log in with Claude Code's own login (M7, 2026-11-15). Opt-in sharing (M8) is next. No release yet. · Written 2026-11-11, redesigned 2026-11-15
+Status: milestones 1–8 built. Accounts log in with Claude Code's own login (M7, 2026-11-15) and share parts of `~/.claude` on request (M8, 2026-11-23). No release yet. · Written 2026-11-11, redesigned 2026-11-15
 
 Pick the Claude Code account **per folder**, the way `.nvmrc` / `.node-version` pick a Node version with fnm. A `.claude-account` file names an account. The nearest one up the folder tree wins. `claude` starts logged in as that account. Each account starts with a Claude Code setup of its own, and you choose which parts of your usual setup it shares.
 
@@ -97,10 +97,10 @@ cam first passed a long-lived `claude setup-token` token as `CLAUDE_CODE_OAUTH_T
 - **Never shared or copied:** MCP servers and first-run state. Copying them out of `.claude.json` would mean cam reading and writing a file of Claude Code's that can hold secrets, since MCP server configs often carry API keys. cam never writes inside an existing file of Claude Code's; it only makes links, and the empty files and folders described under Links. Per account, MCP servers are added the native way (`CAM_ACCOUNT=work claude mcp add -s user …`), or come from a plugin shared through `settings`. Each account goes through the first-run screens once.
 - **Choosing:**
   - `cam add <name>` shows a picker with the four groups, none checked, when stdin and stderr are terminals. Enter shares nothing.
-  - The picker says what each group would share today, from a look at `~/.claude`: which of its files exist, and how many entries each folder holds (`settings: settings.json, plugins/ (4), hooks/ (2)`). Under the list, one line says what sharing means both ways: a shared group is the same files for both, so a change in either account shows up in the other.
+  - The picker says what each group would share today, from a look at `~/.claude`: which of its files exist, and how many entries each folder holds (`settings: settings.json, plugins/ (4), hooks/ (2)`). Above the list, one line says what sharing means both ways: a shared group is the same files for both, so a change in either account shows up in the other. Space ticks, Enter confirms, and Esc cancels: `add` then creates nothing.
   - `--share <groups>` skips the picker. With no terminal and no `--share`, nothing is shared.
   - The choice is saved as `share = [...]` in `[accounts.<name>]`, in table order.
-  - `cam share <name> <group>…` and `cam unshare <name> <group>…` change it later. `cam share <name>` alone, on a terminal, shows the picker with the current choice checked. Editing `share` by hand works too: the next launch adds the missing links.
+  - `cam share <name> <group>…` and `cam unshare <name> <group>…` change it later. `cam share <name>` alone, on a terminal, shows the picker with the current choice checked. Unticking a group there stops sharing it, as `unshare` does without `--copy`. Editing `share` by hand works too: the next launch adds the missing links.
   - **One syntax everywhere:** groups can be comma-separated, separate words or repeated flags, and the forms mix: `--share settings,skills`, `--share settings --share skills`, `cam share work settings skills`, `cam share work settings,skills`. `all` means the four groups in each of them, `cam unshare work all` included. `none` is only for `--share`, where it skips the picker.
 - **Links:**
   - Absolute, to `<home>/.claude/<name>`.
@@ -155,7 +155,7 @@ system (no CAM_ACCOUNT or .claude-account)
 |---|---|
 | `cam add <name> [--share <groups>] [-- <login args>]` | Creates the account dir, links the groups it shares (M8), runs Claude Code's login in it, and says who it logged in as. |
 | `cam login [<name>] [-- <login args>]` | Runs Claude Code's login again for an account (by default, the one that applies here), and says who it logged in as. |
-| `cam share <name> [<group>…]` / `cam unshare <name> <group>…` | Changes what an account shares (M8, see Sharing). |
+| `cam share <name> [<group>…] [--yes]` / `cam unshare <name> <group>… [--copy]` | Changes what an account shares (see Sharing). `share` adds to what it shares, and also links again a group it already shares. |
 | `cam remove <name> [--yes]` | Asks, then logs the account out and deletes its dir and config entry. The shared files are untouched. |
 | `cam list` | `system` and the accounts, with the email each one is logged in as and, from M8, what it shares. |
 | `cam use <name> [--dir <d>]` | Writes `.claude-account` in the current directory (or `<d>`, which must exist), containing just `<name>\n` and replacing any existing marker. Validates that the name exists. `cam use system` needs no account. Says what it replaced (`(work, was personal)`), and notes when the folder is in a git repository. A leading `~` in `<d>` is the home dir, since shells leave it alone in `--dir=~/x`. |
@@ -198,7 +198,7 @@ system (no CAM_ACCOUNT or .claude-account)
 - It works on partial state (only a dir, or only an entry), and fails if there's neither, with a close name or `cam list` as the hint.
 
 ### `list`
-- One row per account, `system` first: the name, and the email from `oauthAccount.emailAddress` in its `.claude.json`, or `-`. For `system` that's `~/.claude.json`, or the one in a `CLAUDE_CONFIG_DIR` the user exported. From M8, a third column lists the groups it shares.
+- One row per account, `system` first: the name, and the email from `oauthAccount.emailAddress` in its `.claude.json`, or `-`. For `system` that's `~/.claude.json`, or the one in a `CLAUDE_CONFIG_DIR` the user exported. Once an account shares something, a third column, SHARES, lists each account's groups.
 - It reads files only and never runs `claude`, so it's instant. That's Claude Code's last record, not a live check. `whoami` and `doctor` ask Claude Code.
 
 ### Config writes
@@ -248,7 +248,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
   ```
 - Because it asks Claude Code in claude's own environment, an `ANTHROPIC_API_KEY` that outranks the login shows up as what Claude Code would really use. It also warns about it on stderr, after the report.
 - Inside a cam session (`CAM_ACTIVE_ACCOUNT` set), it adds which account that session runs as.
-- From M8, a `shares:` line lists the account's groups.
+- For an account that shares something, a `shares:` line lists its groups.
 - Within 3 days of expiry, it warns with the `cam login <name>` hint.
 - Not logged in, or expired: it prints the report, then fails with the `cam login <name>` hint.
 - If something outranks the login, the login line names it (`ANTHROPIC_API_KEY, which Claude Code uses instead of a login`), and it doesn't fail.
@@ -270,7 +270,8 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - **system:** who Claude Code's own setup is logged in as. Not logged in is `info`, since someone may use only cam accounts, and an expiring or expired login is `warn`.
 - **account `<name>`,** one per configured account:
   - The dir exists (`fail` if not).
-  - From M8, for each group the account shares, each entry is a link to its place in `~/.claude`. A missing link is `warn` (the next launch adds it). A real file or folder in its place is `warn`, naming it: that part isn't shared.
+  - For each group the account shares, each entry is a link to its place in `~/.claude`: `ok` once for all of them. A missing link is `warn` (the next launch adds it). A real file or folder in its place, or a link elsewhere, is `warn`, naming it: that part isn't shared, and `cam share <name> <group>` is the fix. A `keybindings.json` that `~/.claude` doesn't have yet is `info`.
+  - Each `*.before-share-*` entry in its dir is `info`, so it isn't forgotten.
   - The login: `ok` with the email and expiry, `warn` within 3 days of expiry (when Claude Code starts warning too), `fail` if expired or not logged in. The hint is `cam login <name>`.
 - **same account:** two accounts, or an account and `system`, logged in as the same email in the same org: `warn`. The same email in different orgs is fine.
 - **here:** the folder's resolution, as `which` prints it, or its error.
@@ -302,7 +303,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
   - An empty `CAM_CONFIG` counts as unset. The fallback really is `~/.config/cam/config.toml` on macOS as well (not `~/Library/Application Support`), and `XDG_CONFIG_HOME` is not consulted.
   - A missing file is an empty config: no accounts.
   - The config is **validated strictly** every time it's read. Unknown keys are errors, so a typo is never silently ignored. Account names follow the name rule and can't be `system`.
-  - In M7 an account table has no keys. M8 adds `share`, the groups the account shares (see Sharing). A missing `share` means none, and an unknown group is an error, like any unknown key.
+  - An account table has one key, `share`, the groups the account shares (see Sharing), added in M8. A missing `share` means none, and an unknown group is an error, like any unknown key.
 - **Account dirs:** `~/.local/share/cam/accounts/<name>/`, built from the home dir and always spelled the same way, because the credential slot is keyed to the spelling.
 - **Credentials:** Claude Code's own. cam never reads, writes or lists them. It only runs `claude auth login`, `logout` and `status`.
 
@@ -318,7 +319,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 
 ## Crates
 
-`clap` (derive), `clap_complete`, `serde` + `toml` for reading, `toml_edit` for writing, `serde_json` (for `auth status` and `.claude.json`), `dirs`, `anyhow`, `thiserror` (typed errors that tests can match on). Dates use a small built-in civil-date routine instead of a date crate. For tests: `assert_cmd`, `predicates`, `tempfile`. M7 dropped `security-framework` and `rpassword`, and added `libc` to ignore Ctrl-C while `claude auth login` runs. M8 adds a multi-select picker, such as `dialoguer`.
+`clap` (derive), `clap_complete`, `serde` + `toml` for reading, `toml_edit` for writing, `serde_json` (for `auth status` and `.claude.json`), `dirs`, `anyhow`, `thiserror` (typed errors that tests can match on). Dates use a small built-in civil-date routine instead of a date crate. For tests: `assert_cmd`, `predicates`, `tempfile`. M7 dropped `security-framework` and `rpassword`, and added `libc` to ignore Ctrl-C while `claude auth login` runs. M8 added `dialoguer` (0.12, without its default features) for the picker.
 
 ## Testing
 
@@ -332,11 +333,11 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - Ctrl-C during `add` was checked by hand, by sending SIGINT to the process group the way a terminal does: cam logged out and deleted the dir.
 - The sandbox clears the environment and sets its own `HOME` and `PATH`, so the real `~/.claude`, the real `claude` and the real Keychain are out of reach.
 - **Resolution unit tests** on temp directory trees: nearest wins, `system` overrides a parent, env beats file, invalid or unknown names fail.
-- **Sharing (M8):** only the chosen groups are linked, links are topped up on launch, a real file is never replaced at launch and `exec` warns about it, `share` moves the account's copies aside and never deletes, `unshare` removes only links (or leaves copies with `--copy`), and `remove` never follows one, so the shared targets survive. Every group syntax parses to the same list. Tests choose through `--share`, `--yes` and a stdin that isn't a terminal. The picker itself isn't driven by tests.
+- **Sharing (M8):** only the chosen groups are linked, links are topped up on launch, a real file is never replaced at launch and `exec` warns about it, `share` moves the account's copies aside and never deletes, `unshare` removes only links (or leaves copies with `--copy`), and `remove` never follows one, so the shared targets survive. Every group syntax parses to the same list. Tests choose through `--share`, `--yes` and a stdin that isn't a terminal. The picker itself isn't driven by tests: it was tried by hand through a pseudo-terminal (2026-11-23), for `add` and `share`: ticking, unticking a shared group, Enter with no change, the question before moving copies aside, and Esc.
 - **PATH discovery** and **plain `claude` end to end:** fake `claude` scripts, cam's link earlier on PATH, `argv[0]` really `claude`, and `init` refusing a real `claude` in the shim dir. `init`'s code is run in a real bash 3.2 (`--norc`) and zsh (`-f`, with and without `compinit`): afterwards `claude` resolves to the link and runs the fake `claude` as the folder's account.
 - **`remove`'s question** isn't driven by tests, whose stdin isn't a terminal: they cover the refusal without `--yes`. It was tried by hand through a pseudo-terminal.
 - **`whoami` and `doctor`:** the check logic is unit tested without I/O. End to end, settings files and variables hold fake secrets, and the tests assert that no value is ever printed.
-- **Manual acceptance:** after `cam add work`, `/status` in a folder marked `work` shows the work account, and outside it shows the system login. The Keychain has the slot named above. Passed 2026-11-15 with two work accounts on Team plans next to a personal Max login: each `/status` showed its own org, with "Enterprise managed settings (remote)" only in the work account. Plain `claude` reaches cam only once the shim dir is on `PATH`, and `doctor` warns until it is. From M8, with every group shared, the links are still links after a session.
+- **Manual acceptance:** after `cam add work`, `/status` in a folder marked `work` shows the work account, and outside it shows the system login. The Keychain has the slot named above. Passed 2026-11-15 with two work accounts on Team plans next to a personal Max login: each `/status` showed its own org, with "Enterprise managed settings (remote)" only in the work account. Plain `claude` reaches cam only once the shim dir is on `PATH`, and `doctor` warns until it is. With every group shared, the links are still links after a session: passed 2026-11-23 with links made by hand (see the notes under Why another one).
 
 ## Milestones
 
@@ -347,7 +348,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 5. `whoami` and `doctor`.
 6. Shell completions.
 7. **Native logins (done 2026-11-15):** an account is an empty config dir with its own login, and shares nothing yet. `add`/`login`/`remove` through `claude auth`, `system` in place of `none`, no `default`, `list`/`whoami`/`doctor` from Claude Code's own record. The Keychain store, the token prompt and `token_created` go.
-8. **Sharing (next):** the file links held in a session (2026-11-23, see the notes under Why another one). To build: the four groups, the picker and `--share`, `share` (moving copies aside) and `unshare` (with `--copy`), links topped up on launch with `exec`'s warning, and `doctor`'s link checks.
+8. **Sharing (done 2026-11-23):** the four groups, the picker and `--share`, `share` (moving copies aside) and `unshare` (with `--copy`), links topped up by every launch and `login` with `exec`'s warning, and `doctor`'s link checks. The file links held in a session first (see the notes under Why another one).
 9. A release (cargo-dist / Homebrew tap). Not planned yet.
 
 Later ideas: Linux (the design no longer needs a secret store, so it may just work *(verify)*), and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
@@ -363,6 +364,11 @@ Later ideas: Linux (the design no longer needs a secret store, so it may just wo
 - **Logical vs physical cwd:** should the walk-up honour `$PWD` when it points at the current directory, as `pwd -L` does? Then markers above a symlinked folder would apply. M1 uses the physical path.
 - Do the VS Code and JetBrains extensions honour a `claude` on PATH?
 - **Name (settled 2026-11-11):** renamed from `clam` to `cam`. On crates.io, `clam` is a template engine, and [`clam-cli`](https://crates.io/crates/clam-cli) ([jose2kk/clam](https://github.com/jose2kk/clam)) is also a Claude Code profile manager. The crate `cam` is taken by an unrelated camera library, so the package is `cam-cli` and the binary is `cam`. `Cargo.toml` keeps `publish = false` until a release. When Linux support comes, check for a clash with libcamera's `cam` utility.
+- **Decided 2026-11-23, building M8:**
+  - Files cam creates in `~/.claude` are 0600 and folders 0700, since they can hold prompts and transcripts.
+  - The SHARES column of `list` and the `shares:` line of `whoami` show only once an account shares something, so the common output stays as it was.
+  - `cam add` without sharing lists `cam share <name>` among its next steps.
+  - A link to the right place by another spelling (say, through `..`) counts as linked.
 - **Decided 2026-11-15:**
   - Native logins replace token mode (see Token mode).
   - `none` becomes `system`, because it's your normal login, not "no account".

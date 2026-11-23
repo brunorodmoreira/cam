@@ -16,6 +16,7 @@ use toml_edit::{DocumentMut, Item, Table};
 
 use crate::account::{SYSTEM, is_valid_name};
 use crate::error::Error;
+use crate::share::{self, Group};
 
 pub const ENV_CONFIG: &str = "CAM_CONFIG";
 
@@ -26,10 +27,14 @@ pub struct Config {
     accounts: BTreeMap<String, Account>,
 }
 
-/// An account's settings. None yet: M8 adds what it shares.
-#[derive(Debug, Deserialize)]
+/// An account's settings: what it shares with `~/.claude`.
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Account {}
+pub struct Account {
+    /// The groups it shares. Missing means none.
+    #[serde(default)]
+    share: Vec<Group>,
+}
 
 /// `$CAM_CONFIG` if set and non-empty, else `<home>/.config/cam/config.toml`.
 pub fn path(env: Option<OsString>, home: Option<PathBuf>) -> Result<PathBuf, Error> {
@@ -93,6 +98,14 @@ impl Config {
     pub fn accounts(&self) -> &BTreeMap<String, Account> {
         &self.accounts
     }
+
+    /// The groups `name` shares, in table order. None for an unknown name.
+    pub fn shares(&self, name: &str) -> Vec<Group> {
+        self.accounts
+            .get(name)
+            .map(|account| share::normalize(account.share.clone()))
+            .unwrap_or_default()
+    }
 }
 
 /// Whether `text` is a config from token mode (M1–M6): it has a top-level
@@ -127,6 +140,28 @@ pub fn add_account(path: &Path, name: &str) -> Result<(), Error> {
             let mut table = Table::new();
             table.decor_mut().set_prefix("\n");
             accounts.insert(name, Item::Table(table));
+        }
+        Some(())
+    })
+}
+
+/// Sets the groups `name` shares, in table order. With none, the `share`
+/// key goes. The entry must exist.
+pub fn set_share(path: &Path, name: &str, groups: &[Group]) -> Result<(), Error> {
+    edit(path, |doc| {
+        let account = doc
+            .get_mut("accounts")?
+            .as_table_like_mut()?
+            .get_mut(name)?
+            .as_table_like_mut()?;
+        match share::normalize(groups.to_vec()).as_slice() {
+            [] => {
+                account.remove("share");
+            }
+            groups => {
+                let array: toml_edit::Array = groups.iter().map(|group| group.name()).collect();
+                account.insert("share", toml_edit::value(array));
+            }
         }
         Some(())
     })
@@ -244,6 +279,34 @@ mod tests {
         let tree = Tree::new();
         let path = tree.config("[accounts.work]\n");
         assert!(Config::load(&path).unwrap().has_account("work"));
+    }
+
+    #[test]
+    fn reads_what_an_account_shares() {
+        let config = parse(
+            "[accounts.work]\nshare = [\"skills\", \"settings\", \"skills\"]\n\n[accounts.personal]\n",
+        )
+        .unwrap();
+        assert_eq!(config.shares("work"), [Group::Settings, Group::Skills]);
+        assert_eq!(config.shares("personal"), []);
+        assert_eq!(config.shares("nobody"), []);
+    }
+
+    #[test]
+    fn rejects_an_unknown_group() {
+        let err = parse("[accounts.work]\nshare = [\"mcp\"]\n").unwrap_err();
+        assert!(matches!(err, Error::ParseConfig { .. }));
+        let cause = std::error::Error::source(&err).unwrap().to_string();
+        assert!(
+            cause.contains(
+                "unknown group \"mcp\"; the groups are settings, instructions, skills and history"
+            ),
+            "{cause}"
+        );
+        assert!(matches!(
+            parse("[accounts.work]\nshare = \"settings\"\n"),
+            Err(Error::ParseConfig { .. })
+        ));
     }
 
     #[test]
@@ -404,6 +467,47 @@ mod tests {
         let missing = tree.root.join("missing.toml");
         assert!(!remove_account(&missing, "work").unwrap());
         assert!(!missing.exists(), "removing must not create the file");
+    }
+
+    #[test]
+    fn set_share_writes_groups_in_table_order_and_removes_the_key_when_empty() {
+        let tree = Tree::new();
+        let path = tree.config("# mine\n[accounts.work] # day job\n\n[accounts.personal]\n");
+        set_share(&path, "work", &[Group::Skills, Group::Settings]).unwrap();
+        assert_eq!(
+            read(&path),
+            "# mine\n[accounts.work] # day job\nshare = [\"settings\", \"skills\"]\n\n[accounts.personal]\n"
+        );
+        assert_eq!(
+            Config::load(&path).unwrap().shares("work"),
+            [Group::Settings, Group::Skills]
+        );
+        set_share(&path, "work", &[]).unwrap();
+        assert_eq!(
+            read(&path),
+            "# mine\n[accounts.work] # day job\n\n[accounts.personal]\n"
+        );
+    }
+
+    #[test]
+    fn set_share_works_with_inline_account_tables() {
+        let tree = Tree::new();
+        let path = tree.config("accounts = { work = {} }\n");
+        set_share(&path, "work", &[Group::History]).unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().shares("work"),
+            [Group::History]
+        );
+    }
+
+    #[test]
+    fn set_share_needs_the_entry() {
+        let tree = Tree::new();
+        let path = tree.config("[accounts.personal]\n");
+        assert!(matches!(
+            set_share(&path, "work", &[Group::Skills]),
+            Err(Error::ConfigShape { .. })
+        ));
     }
 
     #[test]

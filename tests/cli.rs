@@ -787,7 +787,8 @@ fn add_logs_in_and_records_the_account() {
              \n\
              Next:\n  \
                cam use work            use work in this folder and the ones below it (or pass --dir)\n  \
-               eval \"$(cam init zsh)\"  at the end of ~/.zshrc, so plain `claude` picks the account\n\
+               eval \"$(cam init zsh)\"  at the end of ~/.zshrc, so plain `claude` picks the account\n  \
+               cam share work          share your settings, CLAUDE.md, skills or history with it\n\
              \n\
              work starts with an empty Claude Code setup of its own: its first session shows the first-run screens, \
              and your settings, CLAUDE.md, skills and MCP servers in ~/.claude aren't there.\n",
@@ -819,7 +820,11 @@ fn add_skips_the_init_step_once_plain_claude_reaches_cam() {
             .success(),
     );
     assert!(
-        out.contains("  cam use work  use work in this folder"),
+        out.contains("  cam use work    use work in this folder"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  cam share work  share your settings"),
         "{out}"
     );
     assert!(!out.contains("cam init"), "{out}");
@@ -2392,4 +2397,549 @@ fn bash_completes_account_names() {
     let position = |name: &str| subcommands.iter().position(|value| value == name);
     assert!(position("add") < position("remove"), "{subcommands:?}");
     assert!(position("use") < position("which"), "{subcommands:?}");
+}
+
+// --- sharing ---
+
+impl Sandbox {
+    /// `<home>/.claude/<name>`, Claude Code's own setup.
+    fn claude_dir(&self, name: &str) -> PathBuf {
+        self.home().join(".claude").join(name)
+    }
+
+    /// Writes `<home>/.claude/<rel>`, with its folders.
+    fn claude_file(&self, rel: &str, content: &str) -> PathBuf {
+        let path = self.claude_dir(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+        path
+    }
+}
+
+/// Fails unless each of `names` in account `dir` is a link to its place in
+/// the sandbox's `~/.claude`.
+fn assert_linked(sb: &Sandbox, dir: &Path, names: &[&str]) {
+    for name in names {
+        assert_eq!(
+            fs::read_link(dir.join(name)).ok(),
+            Some(sb.claude_dir(name)),
+            "{name} should be a link to ~/.claude/{name}"
+        );
+    }
+}
+
+/// Fails if any of `names` in `dir` is a link.
+fn assert_not_linked(dir: &Path, names: &[&str]) {
+    for name in names {
+        let link =
+            fs::symlink_metadata(dir.join(name)).is_ok_and(|meta| meta.file_type().is_symlink());
+        assert!(!link, "{name} should not be a link");
+    }
+}
+
+const SETTINGS_LINKS: [&str; 3] = ["settings.json", "plugins", "hooks"];
+const SKILLS_LINKS: [&str; 4] = ["skills", "agents", "commands", "output-styles"];
+const HISTORY_LINKS: [&str; 5] = [
+    "projects",
+    "history.jsonl",
+    "file-history",
+    "todos",
+    "plans",
+];
+
+#[test]
+fn add_shares_the_chosen_groups() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    let keep = sb.claude_file("skills/keep.md", "mine\n");
+    let out = stdout_of(
+        &sb.cam(&sb.root)
+            .args(["add", "work", "--share", "settings,skills"])
+            .assert()
+            .success(),
+    );
+    assert!(out.contains("added work: logged in as work@example.com (Acme, team)\nwork shares settings and skills with ~/.claude\n"), "{out}");
+    assert!(
+        out.contains("Apart from settings and skills, work starts with an empty Claude Code setup"),
+        "{out}"
+    );
+    assert!(!out.contains("cam share work"), "{out}");
+    assert_eq!(
+        read(&sb.config),
+        "[accounts.work]\nshare = [\"settings\", \"skills\"]\n"
+    );
+    let dir = sb.account_dir("work");
+    assert_linked(&sb, &dir, &SETTINGS_LINKS);
+    assert_linked(&sb, &dir, &SKILLS_LINKS);
+    // Missing shared files and folders are made, empty; existing ones kept.
+    assert_eq!(read(&sb.claude_dir("settings.json")), "{}\n");
+    assert!(sb.claude_dir("plugins").is_dir());
+    assert_eq!(read(&keep), "mine\n");
+    assert_eq!(read(&dir.join("skills/keep.md")), "mine\n");
+    // No keybindings.json yet, and the other groups stay out.
+    assert!(fs::symlink_metadata(dir.join("keybindings.json")).is_err());
+    assert!(fs::symlink_metadata(dir.join("CLAUDE.md")).is_err());
+    assert!(fs::symlink_metadata(dir.join("projects")).is_err());
+}
+
+#[test]
+fn every_share_syntax_records_the_same_groups() {
+    for args in [
+        &["--share", "skills,settings"][..],
+        &["--share", "settings", "--share", "skills"],
+        &["--share=settings, skills"],
+        &["--share", "skills", "--share", "settings,skills"],
+    ] {
+        let sb = Sandbox::with_config(None);
+        sb.fake_claude("bin");
+        sb.cam(&sb.root)
+            .args(["add", "work"])
+            .args(args)
+            .assert()
+            .success();
+        assert_eq!(
+            read(&sb.config),
+            "[accounts.work]\nshare = [\"settings\", \"skills\"]\n",
+            "{args:?}"
+        );
+    }
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["add", "work", "--share", "all"])
+        .assert()
+        .success();
+    assert_eq!(
+        read(&sb.config),
+        "[accounts.work]\nshare = [\"settings\", \"instructions\", \"skills\", \"history\"]\n"
+    );
+    let dir = sb.account_dir("work");
+    assert_linked(&sb, &dir, &["CLAUDE.md", "rules"]);
+    assert_linked(&sb, &dir, &HISTORY_LINKS);
+    assert_eq!(read(&sb.claude_dir("history.jsonl")), "");
+    assert_eq!(read(&sb.claude_dir("CLAUDE.md")), "");
+}
+
+#[test]
+fn add_shares_nothing_with_none_or_without_a_terminal() {
+    for args in [&["--share", "none"][..], &[]] {
+        let sb = Sandbox::with_config(None);
+        sb.fake_claude("bin");
+        sb.cam(&sb.root)
+            .args(["add", "work"])
+            .args(args)
+            .assert()
+            .success();
+        assert_eq!(read(&sb.config), "[accounts.work]\n", "{args:?}");
+        let dir = sb.account_dir("work");
+        assert_not_linked(&dir, &SETTINGS_LINKS);
+        assert_not_linked(&dir, &HISTORY_LINKS);
+        assert!(!sb.home().join(".claude").exists(), "{args:?}");
+    }
+}
+
+#[test]
+fn add_rejects_a_bad_share_before_doing_anything() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    for (share, error) in [
+        (
+            "settings,setings",
+            "cam: unknown group \"setings\"\nhint: did you mean `settings`? The groups are settings, instructions, skills and history, or `all`\n",
+        ),
+        ("none,skills", "cam: `none` can't go with other groups\n"),
+        (
+            "",
+            "cam: no group named\nhint: the groups are settings, instructions, skills and history, or `all`\n",
+        ),
+    ] {
+        sb.cam(&sb.root)
+            .args(["add", "work", "--share", share])
+            .assert()
+            .code(1)
+            .stdout("")
+            .stderr(error);
+    }
+    assert!(!sb.account_dir("work").exists());
+    assert!(!sb.config.exists());
+    assert_eq!(sb.log(), "");
+}
+
+#[test]
+fn a_failed_add_keeps_the_shared_files() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    let keep = sb.claude_file("skills/keep.md", "mine\n");
+    sb.cam(&sb.root)
+        .args(["add", "work", "--share", "skills"])
+        .env("FAKE_LOGIN", "fail")
+        .assert()
+        .code(1);
+    assert!(!sb.account_dir("work").exists());
+    assert_eq!(read(&keep), "mine\n");
+}
+
+#[test]
+fn exec_tops_up_links_and_leaves_the_accounts_own_files() {
+    let sb = Sandbox::with_config(Some(
+        "[accounts.work]\nshare = [\"settings\", \"instructions\"]\n",
+    ));
+    let claude = sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    fs::write(dir.join("settings.json"), "{\"mine\": true}\n").unwrap();
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .arg("exec")
+        .assert()
+        .success()
+        .stdout(launched(&claude, "", &dir.display().to_string(), "work", 1))
+        .stderr(
+            "warning: work's settings.json is a file, not a link to ~/.claude/settings.json, so work doesn't share it\n\
+             hint: run `cam share work settings` to move it aside and link it\n",
+        );
+    assert_linked(&sb, &dir, &["plugins", "hooks", "CLAUDE.md", "rules"]);
+    assert_eq!(read(&dir.join("settings.json")), "{\"mine\": true}\n");
+    // keybindings.json waits until Claude Code's own setup has one.
+    assert!(fs::symlink_metadata(dir.join("keybindings.json")).is_err());
+    sb.claude_file("keybindings.json", "{\"bindings\": []}\n");
+    fs::remove_file(dir.join("rules")).unwrap();
+    sb.cam(&sb.dir("work")).arg("exec").assert().success();
+    assert_linked(&sb, &dir, &["keybindings.json", "rules"]);
+}
+
+#[test]
+fn login_tops_up_links() {
+    let sb = Sandbox::with_config(Some("[accounts.work]\nshare = [\"skills\"]\n"));
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "work@example.com");
+    sb.cam(&sb.root).args(["login", "work"]).assert().success();
+    assert_linked(&sb, &dir, &SKILLS_LINKS);
+}
+
+#[test]
+fn share_asks_before_moving_the_accounts_own_copies_aside() {
+    let sb = Sandbox::new();
+    let dir = sb.logged_in("work", "you@company.com");
+    fs::write(dir.join("settings.json"), "{\"mine\": true}\n").unwrap();
+    fs::create_dir(dir.join("plugins")).unwrap();
+    // No terminal and no --yes: nothing changes.
+    sb.cam(&sb.root)
+        .args(["share", "work", "settings"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(
+            "cam: work has its own settings.json and plugins/, which sharing moves aside, and there's no terminal to ask first\n\
+             hint: pass --yes to go ahead; nothing is deleted\n",
+        );
+    assert_eq!(read(&sb.config), CONFIG);
+    assert_eq!(read(&dir.join("settings.json")), "{\"mine\": true}\n");
+
+    let assert = sb
+        .cam(&sb.root)
+        .args(["share", "work", "settings", "--yes"])
+        .assert()
+        .success()
+        .stderr(
+            "note: nothing was deleted: copy what you want to keep from these into ~/.claude, then delete them\n",
+        );
+    let aside = |name: &str| {
+        let found: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|entry| entry.starts_with(&format!("{name}.before-share-")))
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        dir.join(&found[0])
+    };
+    let (settings_aside, plugins_aside) = (aside("settings.json"), aside("plugins"));
+    assert_eq!(
+        stdout_of(&assert),
+        format!(
+            "work now shares settings with ~/.claude\n\
+             moved work's own settings.json aside, to {}\n\
+             moved work's own plugins/ aside, to {}\n",
+            settings_aside.display(),
+            plugins_aside.display()
+        )
+    );
+    assert_eq!(read(&settings_aside), "{\"mine\": true}\n");
+    assert!(plugins_aside.is_dir());
+    assert_linked(&sb, &dir, &SETTINGS_LINKS);
+    assert_eq!(
+        read(&sb.config),
+        "[accounts.work]\nshare = [\"settings\"]\n\n[accounts.personal]\n"
+    );
+
+    sb.cam(&sb.root)
+        .args(["share", "work", "settings"])
+        .assert()
+        .success()
+        .stdout("work already shares settings\n")
+        .stderr("");
+}
+
+#[test]
+fn share_links_again_what_claude_code_replaced() {
+    let sb = Sandbox::with_config(Some("[accounts.work]\nshare = [\"settings\"]\n"));
+    let dir = sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root)
+        .args(["share", "work", "settings"])
+        .assert()
+        .success()
+        .stdout("work shares settings again: linked settings.json, plugins, hooks\n");
+    // A link replaced by a file, as a save that renames over it would.
+    fs::remove_file(dir.join("settings.json")).unwrap();
+    fs::write(dir.join("settings.json"), "{}\n").unwrap();
+    let out = stdout_of(
+        &sb.cam(&sb.root)
+            .args(["share", "work", "settings", "--yes"])
+            .assert()
+            .success(),
+    );
+    assert!(
+        out.starts_with("work shares settings again: linked settings.json\nmoved work's own settings.json aside, to "),
+        "{out}"
+    );
+    assert_linked(&sb, &dir, &SETTINGS_LINKS);
+}
+
+#[test]
+fn share_adds_to_what_the_account_shares() {
+    let sb = Sandbox::with_config(Some("[accounts.work]\nshare = [\"skills\"]\n"));
+    let dir = sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root)
+        .args(["share", "work", "history", "instructions"])
+        .assert()
+        .success()
+        .stdout("work now shares instructions and history with ~/.claude\n");
+    assert_eq!(
+        read(&sb.config),
+        "[accounts.work]\nshare = [\"instructions\", \"skills\", \"history\"]\n"
+    );
+    assert_linked(&sb, &dir, &HISTORY_LINKS);
+    assert_linked(&sb, &dir, &["CLAUDE.md", "rules"]);
+}
+
+#[test]
+fn share_checks_its_arguments() {
+    let sb = Sandbox::new();
+    sb.logged_in("work", "you@company.com");
+    for (args, error) in [
+        (
+            &["share", "work"][..],
+            "cam: no group named, and there's no terminal to show the choice on\nhint: name them, as in `cam share work settings`, or `all`\n",
+        ),
+        (
+            &["share", "work", "none"],
+            "cam: `none` is only for `cam add --share`\nhint: to stop sharing, run `cam unshare <name> <group>…`\n",
+        ),
+        (
+            &["share", "work", "mcp"],
+            "cam: unknown group \"mcp\"\nhint: the groups are settings, instructions, skills and history, or `all`\n",
+        ),
+        (
+            &["share", "wrok", "skills"],
+            "cam: unknown account \"wrok\"\nhint: did you mean `work`? Or add \"wrok\" with `cam add wrok`\n",
+        ),
+        (
+            &["share", "system", "skills"],
+            "cam: \"system\" is reserved: it's Claude Code's own setup, not an account\n",
+        ),
+    ] {
+        sb.cam(&sb.root).args(args).assert().code(1).stderr(error);
+    }
+    sb.cam(&sb.root)
+        .args(["share", "personal", "skills"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("account \"personal\" has no dir"));
+    assert_eq!(read(&sb.config), CONFIG);
+}
+
+#[test]
+fn unshare_removes_only_links() {
+    let sb = Sandbox::with_config(Some(
+        "[accounts.work]\nshare = [\"settings\", \"skills\"]\n",
+    ));
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    let keep = sb.claude_file("skills/keep.md", "mine\n");
+    sb.cam(&sb.root).args(["login", "work"]).assert().success();
+    fs::remove_file(dir.join("agents")).unwrap();
+    fs::create_dir(dir.join("agents")).unwrap();
+    sb.cam(&sb.root)
+        .args(["unshare", "work", "skills"])
+        .assert()
+        .success()
+        .stdout(
+            "work no longer shares skills: removed the links skills, commands, output-styles. \
+             Your files stay in ~/.claude, and work starts over for these.\n\
+             skipped work's agents: it's a folder of its own, not a link\n",
+        )
+        .stderr("");
+    assert_eq!(
+        read(&sb.config),
+        "[accounts.work]\nshare = [\"settings\"]\n"
+    );
+    assert_not_linked(&dir, &SKILLS_LINKS);
+    assert!(dir.join("agents").is_dir());
+    assert_eq!(read(&keep), "mine\n");
+    assert_linked(&sb, &dir, &SETTINGS_LINKS);
+}
+
+#[test]
+fn unshare_with_copy_keeps_a_copy_of_each() {
+    let sb = Sandbox::with_config(Some(
+        "[accounts.work]\nshare = [\"instructions\", \"history\"]\n",
+    ));
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    sb.claude_file("CLAUDE.md", "be brief\n");
+    sb.claude_file("projects/repo/session.jsonl", "0123456789\n");
+    sb.cam(&sb.root).args(["login", "work"]).assert().success();
+    sb.cam(&sb.root)
+        .args(["unshare", "work", "all", "--copy"])
+        .assert()
+        .success()
+        .stdout(
+            "work no longer shares instructions: replaced the links CLAUDE.md, rules with copies of what they pointed to. \
+             ~/.claude is unchanged, and work goes its own way from here.\n\
+             work no longer shares history: replaced the links projects, history.jsonl, file-history, todos, plans with copies of what they pointed to. \
+             ~/.claude is unchanged, and work goes its own way from here.\n",
+        )
+        .stderr(format!(
+            "Copying 11 B of history into {}...\nnote: work didn't share settings\nnote: work didn't share skills\n",
+            dir.display()
+        ));
+    assert_eq!(read(&sb.config), "[accounts.work]\n");
+    assert_not_linked(&dir, &["CLAUDE.md", "projects"]);
+    assert_eq!(read(&dir.join("CLAUDE.md")), "be brief\n");
+    assert_eq!(
+        read(&dir.join("projects/repo/session.jsonl")),
+        "0123456789\n"
+    );
+    assert_eq!(read(&sb.claude_dir("CLAUDE.md")), "be brief\n");
+}
+
+#[test]
+fn unshare_what_is_not_shared_fails() {
+    let sb = Sandbox::new();
+    sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root)
+        .args(["unshare", "work", "settings"])
+        .assert()
+        .code(1)
+        .stderr("cam: work doesn't share settings\nhint: work shares nothing\n");
+    sb.cam(&sb.root)
+        .args(["unshare", "work"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("<GROUP>"));
+}
+
+#[test]
+fn remove_keeps_what_the_account_shared() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    let keep = sb.claude_file("projects/repo/session.jsonl", "keep\n");
+    sb.cam(&sb.root)
+        .args(["add", "work", "--share", "all"])
+        .assert()
+        .success();
+    sb.cam(&sb.root)
+        .args(["remove", "work", "--yes"])
+        .assert()
+        .success();
+    assert!(!sb.account_dir("work").exists());
+    assert_eq!(read(&keep), "keep\n");
+    assert_eq!(read(&sb.claude_dir("settings.json")), "{}\n");
+    assert!(sb.claude_dir("skills").is_dir());
+}
+
+#[test]
+fn list_and_whoami_show_what_an_account_shares() {
+    let sb = Sandbox::with_config(Some(
+        "[accounts.work]\nshare = [\"skills\", \"settings\"]\n\n[accounts.personal]\n",
+    ));
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root).arg("list").assert().success().stdout(
+        "ACCOUNT   EMAIL            SHARES\n\
+             system    -                -\n\
+             personal  -                -\n\
+             work      you@company.com  settings, skills\n",
+    );
+    let out = stdout_of(
+        &sb.cam(&sb.root)
+            .arg("whoami")
+            .env("CAM_ACCOUNT", "work")
+            .assert()
+            .success(),
+    );
+    assert!(
+        any_days(&out).ends_with(
+            "  login:   expires 2099-01-01 (in N days)\n  shares:  settings and skills\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn doctor_checks_the_links() {
+    let sb = Sandbox::with_config(Some(
+        "[accounts.work]\nshare = [\"settings\", \"skills\"]\n\n[accounts.personal]\nshare = [\"instructions\"]\n",
+    ));
+    sb.fake_claude("bin");
+    let work = sb.logged_in("work", "you@company.com");
+    let personal = sb.logged_in("personal", "me@home.org");
+    sb.cam(&sb.root).args(["login", "work"]).assert().success();
+    sb.cam(&sb.root)
+        .args(["login", "personal"])
+        .assert()
+        .success();
+    fs::remove_file(work.join("settings.json")).unwrap();
+    fs::write(work.join("settings.json"), "{}\n").unwrap();
+    fs::remove_file(work.join("agents")).unwrap();
+    fs::write(work.join("settings.json.before-share-2026-11-20"), "{}\n").unwrap();
+    assert_linked(&sb, &personal, &["CLAUDE.md", "rules"]);
+    let out = any_days(&stdout_of(
+        &sb.cam(&sb.root).arg("doctor").assert().success(),
+    ));
+    for expected in [
+        "ok    account personal: logged in as personal@example.com (Acme, team), login expires 2099-01-01 (in N days)\n\
+         ok    account personal: shares instructions, linked to ~/.claude\n\
+         ok    account work: logged in as work@example.com (Acme, team), login expires 2099-01-01 (in N days)\n",
+        "warn  account work: its settings.json is a file, not a link to ~/.claude/settings.json, so work doesn't share it\n      \
+         hint: run `cam share work settings` to move it aside and link it\n\
+         info  account work: ~/.claude/keybindings.json doesn't exist yet; once it does, the next `claude` in work links it\n\
+         warn  account work: agents isn't linked to ~/.claude/agents/\n      \
+         hint: the next `claude` in work links it\n\
+         info  account work: settings.json.before-share-2026-11-20 is work's own copy from before it shared\n      \
+         hint: copy what you want to keep from it into ~/.claude, then delete it\n",
+    ] {
+        assert!(out.contains(expected), "{out}");
+    }
+}
+
+#[test]
+fn completions_offer_the_groups() {
+    let sb = Sandbox::new();
+    let fish = String::from_utf8(
+        sb.cam(&sb.root)
+            .args(["completions", "fish"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    )
+    .unwrap();
+    for expected in [
+        "complete -c cam -n \"__fish_cam_using_subcommand share\" -f -a 'work'\n",
+        "complete -c cam -n \"__fish_cam_using_subcommand share\" -f -a 'settings' -d 'permissions, hooks, model, theme, status line, plugins'\n",
+        "complete -c cam -n \"__fish_cam_using_subcommand unshare\" -f -a 'all' -d 'every group'\n",
+    ] {
+        assert!(fish.contains(expected), "{expected}\n---\n{fish}");
+    }
 }

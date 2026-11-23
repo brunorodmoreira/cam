@@ -15,6 +15,7 @@ use clap_complete::Shell;
 use crate::account::SYSTEM;
 use crate::config::Config;
 use crate::redact::redact;
+use crate::share::Group;
 
 const BIN: &str = "cam";
 
@@ -61,9 +62,10 @@ fn fish_values(cmd: &Command) -> String {
     lines
 }
 
-/// `cmd` with account names as the values of `use`, `login` and `remove`.
-/// Only for generating completions: parsing must still accept new names,
-/// as `add` does.
+/// `cmd` with account names as the values of `use`, `login`, `remove`,
+/// `share` and `unshare`, and group names for sharing. Only for generating
+/// completions: parsing must still accept new names, as `add` does, and
+/// group lists such as `settings,skills`.
 fn with_accounts(mut cmd: Command, config: Option<&Config>) -> Command {
     let accounts: Vec<PossibleValue> = config
         .map(|config| {
@@ -76,18 +78,40 @@ fn with_accounts(mut cmd: Command, config: Option<&Config>) -> Command {
         .unwrap_or_default();
     let mut with_system = accounts.clone();
     with_system.push(PossibleValue::new(SYSTEM).help("Claude Code's own setup"));
+    let groups: Vec<PossibleValue> = Group::ALL
+        .iter()
+        .map(|group| PossibleValue::new(group.name()).help(group.covers()))
+        .chain([PossibleValue::new("all").help("every group")])
+        .collect();
+    let mut groups_or_none = groups.clone();
+    groups_or_none.push(PossibleValue::new("none").help("share nothing"));
+    let values = |values: Vec<PossibleValue>| PossibleValuesParser::new(values);
     // Edited in place: `Command::mut_subcommand` would move the subcommand
     // to the end of the list, and bash shows them in list order.
     for sub in cmd.get_subcommands_mut() {
-        let values = match sub.get_name() {
-            "use" | "login" => with_system.clone(),
-            "remove" if !accounts.is_empty() => accounts.clone(),
-            _ => continue,
-        };
-        let taken = std::mem::replace(sub, Command::new(BIN));
-        *sub = taken.mut_arg("name", |arg| {
-            arg.value_parser(PossibleValuesParser::new(values))
-        });
+        let name = sub.get_name().to_owned();
+        let mut taken = std::mem::replace(sub, Command::new(BIN));
+        match name.as_str() {
+            "use" | "login" => {
+                taken = taken.mut_arg("name", |arg| arg.value_parser(values(with_system.clone())));
+            }
+            "remove" | "share" | "unshare" if !accounts.is_empty() => {
+                taken = taken.mut_arg("name", |arg| arg.value_parser(values(accounts.clone())));
+            }
+            _ => {}
+        }
+        match name.as_str() {
+            "share" | "unshare" => {
+                taken = taken.mut_arg("groups", |arg| arg.value_parser(values(groups.clone())));
+            }
+            "add" => {
+                taken = taken.mut_arg("share", |arg| {
+                    arg.value_parser(values(groups_or_none.clone()))
+                });
+            }
+            _ => {}
+        }
+        *sub = taken;
     }
     cmd
 }

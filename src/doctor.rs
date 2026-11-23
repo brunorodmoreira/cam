@@ -20,6 +20,7 @@ use crate::init::{self, Shell};
 use crate::launch::{ENV_ACTIVE, ENV_CONFIG_DIR};
 use crate::resolve::Resolution;
 use crate::settings::{File, Inspection};
+use crate::share::{self, Entry, Group, State};
 use crate::shim::{self, Reaches};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +306,65 @@ pub fn account(name: &str, dir: &Path, dir_exists: bool, login: &Login, today: D
             ),
         },
     }
+}
+
+/// The links of what account `name` shares, from their `states`, and the
+/// entries `cam share` moved aside in its dir (`set_aside`).
+pub fn links(name: &str, states: &[(Group, Entry, State)], set_aside: &[String]) -> Vec<Check> {
+    let subject = format!("account {name}");
+    let mut groups: Vec<Group> = states.iter().map(|(group, _, _)| *group).collect();
+    groups.dedup();
+    let mut checks = Vec::new();
+    for (group, entry, state) in states {
+        let shared = entry.shared_shown();
+        match state {
+            State::Linked => {}
+            State::Missing => checks.push(Check::new(
+                Status::Warn,
+                format!(
+                    "{subject}: {} isn't linked to {shared}\nhint: the next `claude` in {name} links it",
+                    entry.name
+                ),
+            )),
+            State::NotYet => checks.push(Check::new(
+                Status::Info,
+                format!(
+                    "{subject}: {shared} doesn't exist yet; once it does, the next `claude` in {name} links it"
+                ),
+            )),
+            State::Own(own) => checks.push(Check::new(
+                Status::Warn,
+                format!(
+                    "{subject}: its {} is {}, not a link to {shared}, so {name} doesn't share it\n\
+                     hint: run `cam share {name} {group}` to move it aside and link it",
+                    entry.name,
+                    own.describe()
+                ),
+            )),
+        }
+    }
+    if !groups.is_empty() && checks.iter().all(|check| check.status != Status::Warn) {
+        checks.insert(
+            0,
+            Check::new(
+                Status::Ok,
+                format!(
+                    "{subject}: shares {}, linked to ~/.claude",
+                    share::describe(&groups)
+                ),
+            ),
+        );
+    }
+    checks.extend(set_aside.iter().map(|aside| {
+        Check::new(
+            Status::Info,
+            format!(
+                "{subject}: {aside} is {name}'s own copy from before it shared\n\
+                 hint: copy what you want to keep from it into ~/.claude, then delete it"
+            ),
+        )
+    }));
+    checks
 }
 
 /// Accounts (and `system`) logged in as the same claude.ai account: the
