@@ -23,4 +23,9 @@ tap = "brunorodmoreira/homebrew-tap"
 # The formula's name: `brew install brunorodmoreira/tap/cam`
 formula = "cam"
 # Publish jobs to run in CI
-publish-jobs = ["homebrew"]
+publish-jobs = ["homebrew", "./publish-crates"]
+
+# The crates.io job checks out the repo, and asks GitHub for the OIDC token
+# that crates.io's trusted publishing exchanges for a short-lived token.
+[dist.github-custom-job-permissions]
+publish-crates = { contents = "read", id-token = "write" }

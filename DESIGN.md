@@ -354,7 +354,8 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
    - Archives for macOS arm64 and x86_64 and Linux x86_64 and arm64, with checksums, on GitHub Releases. The Linux builds use glibc and are made on Ubuntu 22.04, so they need glibc 2.35 or newer. No Windows build, since cam is Unix only.
    - A shell installer that puts `cam` in `~/.local/bin`, which Claude Code's own installer already has on `PATH`.
    - The Homebrew formula `cam`, pushed to the `brunorodmoreira/homebrew-tap` repo with a token that can write only there (the `HOMEBREW_TAP_TOKEN` secret): `brew install brunorodmoreira/tap/cam`.
-   - The crate `cam-cli` on crates.io, published by hand with `cargo publish`.
+   - The crate `cam-cli` on crates.io. 0.1.0 was published by hand, since crates.io's trusted publishing only works for a crate that exists. From then on, `.github/workflows/publish-crates.yml` publishes it, as a cargo-dist custom publish job. It gets a short-lived token through `rust-lang/crates-io-auth-action`, so no crates.io token is stored. crates.io checks the OIDC token's `workflow_ref` claim, which names the calling workflow, so the trusted publisher names `release.yml`. The job is given only `contents: read` and `id-token: write`.
+   - **Cutting a release:** bump `version` in `Cargo.toml`, add its section to `CHANGELOG.md`, commit, then push a `v<version>` tag. Publishing waits for every build, and the release is announced only once Homebrew and crates.io succeed.
    - Release notes from `CHANGELOG.md`. Linux ships although no real Claude Code session has been tried there, which the README says.
 
 Later ideas: Linux (the design no longer needs a secret store, and the whole test suite passes on Debian, run by CI too, but no real session has been tried *(verify)*), and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
