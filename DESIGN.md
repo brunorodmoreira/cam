@@ -336,6 +336,10 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - **`remove`'s question** isn't driven by tests, whose stdin isn't a terminal: they cover the refusal without `--yes`. It was tried by hand through a pseudo-terminal.
 - **`whoami` and `doctor`:** the check logic is unit tested without I/O. End to end, settings files and variables hold fake secrets, and the tests assert that no value is ever printed.
 - **CI:** GitHub Actions runs `cargo fmt --check`, clippy and the tests on macOS and Ubuntu for each push to `main` and each pull request. Ubuntu gets zsh installed for the `cam init` tests. Locally, the suite also passed in a Debian container, as a non-root user: as root, the test that a read-only dir makes a config write fail can't fail.
+- **Repository rules** (GitHub rulesets, 2026-11-23):
+  - `main` takes changes only through pull requests, merged by squash or rebase into a linear history. The `macos-latest` and `ubuntu-latest` CI jobs must pass, no review is required, and `main` can't be force-pushed or deleted.
+  - Only admins create `v*` tags, which start a release, and no one can move or delete one.
+  - Also on: Dependabot alerts, security updates and weekly Cargo updates, secret scanning with push protection, and private vulnerability reporting. Workflow tokens are read-only unless a workflow asks for more.
 - **Manual acceptance:** after `cam add work`, `/status` in a folder marked `work` shows the work account, and outside it shows the system login. The Keychain has the slot named above. Passed 2026-11-15 with two work accounts on Team plans next to a personal Max login: each `/status` showed its own org, with "Enterprise managed settings (remote)" only in the work account. Plain `claude` reaches cam only once the shim dir is on `PATH`, and `doctor` warns until it is. With every group shared, the links are still links after a session: passed 2026-11-23 with links made by hand (see the notes under Why another one).
 
 ## Milestones
