@@ -18,9 +18,6 @@ install-path = "~/.local/bin/"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
-# TEMPORARY: build every archive on this pull request, to check the Apple
-# Silicon build on an Intel runner. Remove before merging.
-pr-run-mode = "upload"
 # A custom GitHub repo to publish the Homebrew formula to
 tap = "brunorodmoreira/homebrew-tap"
 # The formula's name: `brew install brunorodmoreira/tap/cam`
