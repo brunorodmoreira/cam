@@ -4,17 +4,17 @@ Pick the Claude Code account per folder, the way `.nvmrc` picks a Node version.
 
 Put a `.claude-account` file in a folder. The nearest one up the tree decides which account `claude` starts with. Each account is logged in with Claude Code's own `/login` and stays logged in, so you're signed in to all of them at once.
 
-> **Status: early.** Accounts, logins through Claude Code, sharing parts of your setup with an account, per-folder markers, plain `claude` picking the account, `whoami`, `doctor` and shell completions all work. See the [roadmap](#roadmap).
+> **Status: 0.1, the first release.** macOS is the main platform, and Linux builds are new: see [Platforms](#platforms). What changed in each release is in the [changelog](CHANGELOG.md).
 
 ## Quick start
 
 The login you already have is `system`: Claude Code's own setup in `~/.claude`. cam leaves it alone, and it's what `claude` uses wherever no marker applies. Add another account next to it:
 
 ```sh
-brew install brunorodmoreira/tap/cam   # or see Install for other ways
-cam add work                      # Claude Code's login opens in the browser
-cam use work --dir ~/Work         # every folder under ~/Work uses it
-echo 'eval "$(cam init zsh)"' >> ~/.zshrc   # plain `claude` picks the account
+brew install brunorodmoreira/tap/cam          # or see Install for other ways
+cam add work                                  # Claude Code's login opens in the browser
+cam use work --dir ~/Work                     # every folder under ~/Work uses it
+echo 'eval "$(cam init zsh)"' >> ~/.zshrc     # plain `claude` picks the account
 ```
 
 Open a new terminal, and `claude` under `~/Work` runs as `work`, anywhere else as `system`. `cam add` asks which parts of your own setup the new account should share: your settings, CLAUDE.md, skills or history (see [What an account shares](#what-an-account-shares)). The rest starts empty: its first session shows Claude Code's first-run screens, and your MCP servers aren't in it.
@@ -202,7 +202,7 @@ cam completions fish | source     # ~/.config/fish/config.fish
 cam remove work
 ```
 
-It asks first, since everything in the account's folder goes, including its transcripts and memory, unless it shares them: what it shares stays in `~/.claude`. `--yes` skips the question, and scripts need it. Then it logs the account out, so its login doesn't stay behind in the Keychain, and deletes its folder and its config entry. If the logout fails, nothing is deleted. A `.claude-account` that still names the account then makes `claude` stop with an error until you change it.
+It asks first, since everything in the account's folder goes, including its transcripts and memory, unless it shares them: what it shares stays in `~/.claude`. `--yes` skips the question, and scripts need it. Then it logs the account out, so its login doesn't stay behind (in the Keychain, on macOS), and deletes its folder and its config entry. If the logout fails, nothing is deleted. A `.claude-account` that still names the account then makes `claude` stop with an error until you change it.
 
 ### The config file
 
@@ -255,7 +255,7 @@ MCP servers are never shared: Claude Code keeps them in `.claude.json`, next to 
 
 When an account already has its own copy of something it starts to share, such as its own `settings.json`, `cam share` asks, then renames it to `settings.json.before-share-<date>`. Nothing is deleted: copy what you want from it into `~/.claude`. `cam doctor` lists these copies until you delete them.
 
-Every launch adds missing links, and never replaces a real file. If something saved a shared file by replacing it, cam says so at launch, and `cam share work settings` links it again. Claude Code's own writes keep the links (checked with version 2.1.330), and so do saves from vim and Zed. `cam doctor` checks each link.
+Every launch adds missing links, and never replaces a real file. If something saved a shared file by replacing it, cam says so at launch, and `cam share work settings` links it again. Claude Code's own writes keep the links (checked with Claude Code 2.1.330), and so do saves from vim and Zed. `cam doctor` checks each link.
 
 ## The marker file
 
@@ -272,26 +272,14 @@ work
 
 ## Platforms
 
-- **macOS:** the target for v1. Claude Code keeps each account's login in the Keychain itself.
+- **macOS:** the main platform, arm64 and Intel. Claude Code keeps each account's login in the Keychain itself.
 - **Linux:** released, and the whole test suite passes there, but cam hasn't been tried in a real Claude Code session on Linux yet. The binaries need glibc 2.35 or newer (Ubuntu 22.04, Debian 12). Reports are welcome.
 - **Windows:** not supported. The launcher relies on Unix `exec` and a symlink.
 - **Shells:** `cam init` writes for bash, zsh and fish. cam resolves when `claude` starts, not through a `cd` hook, so they all behave the same. In another shell, put `~/.local/share/cam/shims` first on `PATH` yourself, after running `cam init bash` once to make the link.
 
-## Roadmap
-
-- [x] 1. Resolution, `which`, `use`/`unuse` and the config file
-- [x] 2. Accounts with `add`, `list` and `remove`
-- [x] 3. `exec`: find the real `claude`, set the account, warn about conflicting variables
-- [x] 4. Plain `claude` picks the account: a `claude` → `cam` link first on PATH, set up by `cam init`
-- [x] 5. `whoami` and `doctor`
-- [x] 6. Shell completions
-- [x] 7. Native logins: each account is its own Claude Code config folder with its own `/login`
-- [x] 8. Sharing: pick which parts of your setup each account shares, kept in sync with links
-- [x] 9. A release
-
 ## Design
 
-[DESIGN.md](DESIGN.md) is the full spec.
+[DESIGN.md](DESIGN.md) is the full spec: how cam resolves and launches, what Claude Code was observed to do, and the decisions along the way.
 
 ## License
 
