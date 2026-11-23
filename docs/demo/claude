@@ -1,0 +1,29 @@
+#!/bin/sh
+# A stand-in for `claude`, for recording the demo: `auth` fakes Claude Code's
+# login in the config dir it gets, and anything else says where Claude Code
+# would start. Shell builtins only.
+if [ -n "${CLAUDE_CONFIG_DIR-}" ]; then
+    json="$CLAUDE_CONFIG_DIR/.claude.json"
+else
+    json="$HOME/.claude.json"
+fi
+case "$1 $2" in
+'auth login')
+    sleep 1
+    printf '{"oauthAccount": {"emailAddress": "%s"}}\n' "${FAKE_EMAIL:-you@company.com}" > "$json"
+    printf '%s\n' "${FAKE_EMAIL:-you@company.com}" > "$json.email"
+    echo 'Login successful.'
+    exit 0 ;;
+'auth status')
+    if [ -s "$json.email" ]; then
+        read -r email < "$json.email"
+        printf '{"loggedIn": true, "authMethod": "claude.ai", "email": "%s", "orgName": "Acme", "subscriptionType": "team", "loginExpiresAt": "2099-01-01T00:00:00.000Z"}\n' "$email"
+        exit 0
+    fi
+    echo '{"loggedIn": false, "authMethod": "none"}'
+    exit 1 ;;
+'auth logout')
+    : > "$json.email"
+    exit 0 ;;
+esac
+echo "(Claude Code starts here, as ${CAM_ACTIVE_ACCOUNT:-system})"

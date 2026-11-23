@@ -8,6 +8,8 @@ Pick the Claude Code account per folder, the way `.nvmrc` picks a Node version.
 
 Put a `.claude-account` file in a folder, and `claude` starts with that account there and in every folder below it. Each account is logged in with Claude Code's own `/login` and stays logged in, so you're signed in to all of them at once.
 
+![cam adds an account that shares your instructions and skills, pins it to ~/Work, and claude then runs as work there and as your own login elsewhere](docs/demo.gif)
+
 ## Features
 
 - **Per folder.** One marker at `~/Work` covers every repo under it. Nothing goes into the repos themselves.
