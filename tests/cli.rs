@@ -304,23 +304,6 @@ fn which_reports_system_marker() {
 }
 
 #[test]
-fn which_treats_an_old_none_marker_as_an_unknown_account() {
-    let sb = Sandbox::new();
-    let marker = sb.marker("oss", "none\n");
-    sb.cam(&sb.dir("oss"))
-        .arg("which")
-        .assert()
-        .failure()
-        .stderr(format!(
-            "cam: unknown account \"none\" (from {})\n\
-             hint: `none` was older cam's name for Claude Code's own setup, which is `system` now. \
-             Fix it with `cam use system --dir {}`\n",
-            marker.display(),
-            sb.dir("oss").display()
-        ));
-}
-
-#[test]
 fn which_suggests_a_close_account_name() {
     let sb = Sandbox::new();
     let marker = sb.marker("a", "wrok\n");
@@ -443,22 +426,6 @@ fn which_broken_config_fails() {
             sb.config.display()
         )))
         .stderr(predicate::str::contains("unknown field `acounts`"));
-}
-
-#[test]
-fn which_explains_a_token_mode_config() {
-    let sb = Sandbox::with_config(Some(
-        "default = \"work\"\n[accounts.work]\ntoken_created = 2026-11-11\n",
-    ));
-    sb.marker("a", "work\n");
-    sb.cam(&sb.dir("a"))
-        .arg("which")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("is from cam's token mode"))
-        .stderr(predicate::str::contains(
-            "security delete-generic-password -s cam",
-        ));
 }
 
 #[test]

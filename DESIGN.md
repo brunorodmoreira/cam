@@ -65,7 +65,7 @@ cam first passed a long-lived `claude setup-token` token as `CLAUDE_CODE_OAUTH_T
 - Claude Code can't see the plan in token mode. The header said "Claude API" and `/usage` showed a dollar estimate, though usage did count against the plan's limits. claude.ai connectors and Remote Control don't work with the token.
 - `auth status` reported no identity (`authMethod: "oauth_token"`, `loginExpiresAt: null`), so cam couldn't tell whose a token was. `--email` only recorded what the user typed, and was removed first.
 - Every rebuild of cam brought back a Keychain prompt, and pasting the token into a hidden prompt was easy to get wrong.
-- The org's cached managed settings ended up in the shared folder. Token sessions for a work account wrote `remote-settings.json` and `policy-limits.json` (with their `.signature`/`.stamp` files) into `~/.claude`, next to the system login's setup. Whether system sessions apply them is unknown *(verify)*. With per-account dirs these caches stay in the account.
+- The org's cached managed settings ended up in the shared folder. Token sessions for a work account wrote `remote-settings.json` and `policy-limits.json` (with their `.signature`/`.stamp` files) into `~/.claude`, next to the system login's setup. Sessions of the system login never refreshed them afterwards, so they were leftovers. With per-account dirs these caches stay in the account.
 
 ## Accounts
 
@@ -74,8 +74,7 @@ cam first passed a long-lived `claude setup-token` token as `CLAUDE_CODE_OAUTH_T
   - It starts empty. Claude Code fills it on the first login and session, as it does any new config dir, and the first session shows Claude Code's first-run screens.
   - It shares only the groups chosen for it (see Sharing). Nothing, by default.
   - Always its own, shared or not: `.claude.json` (the account's identity, user-scope MCP servers, trusted folders and first-run state), its login, the org's managed settings and policy caches, and run-time state (`sessions`, `session-env`, `shell-snapshots`, `cache`, `stats-cache.json` and the like).
-- **Names** match `^[a-z0-9][a-z0-9_-]*$`. `system` is reserved. `none`, the reserved name in token mode, is an ordinary name now, so an old `none` marker fails as an unknown account instead of meaning something else.
-- **Migrating from token mode:** before installing M7, run `cam remove <name>` for each account with the old build. It deletes the Keychain item under service `cam`, which the new build no longer knows about. The new build rejects a config that still has `token_created` or `default`, with a hint that names the lines to delete and the `security delete-generic-password -s cam -a <name>` command for a token left in the Keychain.
+- **Names** match `^[a-z0-9][a-z0-9_-]*$`. `system` is reserved.
 
 ## Sharing (M8)
 
@@ -136,7 +135,6 @@ Marker file format:
 - `system` selects Claude Code's own setup for that subtree, overriding a parent marker.
 - An **unknown account name is a hard error**. cam exits non-zero and never silently falls back to another account. The hint depends on the name:
   - a typo of a configured account (at most 2 edits, and fewer edits than the name has letters): `did you mean \`work\`?`, with the fix: `cam use work --dir <marker's dir>` for a marker, `CAM_ACCOUNT=work` for the variable;
-  - `none`, token mode's reserved name: it's `system` now, with the same kind of fix;
   - anything else: `cam add <name>`.
 - An invalid name gets a valid one close to it as a hint, when there is one: `Work` → `work`, `my account` → `my-account`.
 - An **unusable marker is also a hard error, never skipped**. That covers a marker that is unreadable (for example a directory), not UTF-8, names nothing (empty or only comments), or holds an invalid name. Skipping it would silently pick up a parent's account.

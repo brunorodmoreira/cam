@@ -264,7 +264,6 @@ fn escape_hint(err: anyhow::Error) -> anyhow::Error {
                 | Error::NotUtf8 { .. }
                 | Error::ParseConfig { .. }
                 | Error::ConfigShape { .. }
-                | Error::TokenModeConfig { .. }
                 | Error::InvalidConfigAccount { .. }
                 | Error::EmptyMarker { .. }
                 | Error::InvalidName { .. }

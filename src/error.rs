@@ -51,13 +51,6 @@ pub enum Error {
     ConfigShape { path: PathBuf },
 
     #[error(
-        "{path} is from cam's token mode (it has `default` or `token_created`)\n\
-         hint: delete those lines, then run `cam add <name>` for each account. Old tokens stay in the \
-         Keychain until you delete them: `security delete-generic-password -s cam -a <name>`"
-    )]
-    TokenModeConfig { path: PathBuf },
-
-    #[error(
         "invalid account [accounts.{name}] in {path}: names must match {rule} and \"system\" is reserved",
         rule = NAME_RULE
     )]
@@ -252,8 +245,8 @@ pub enum Named<'a> {
     Arg,
 }
 
-/// The hint for an unknown account `name`, given the `known` ones:
-/// `system` for token mode's `none`, a close name for a typo, else `cam add`.
+/// The hint for an unknown account `name`, given the `known` ones: a close
+/// name for a typo, else `cam add`.
 pub fn unknown_hint<'a>(
     name: &str,
     known: impl IntoIterator<Item = &'a str>,
@@ -267,14 +260,6 @@ pub fn unknown_hint<'a>(
         Named::Env => Some(format!("Set CAM_ACCOUNT={to}")),
         Named::Arg => None,
     };
-    if name == "none" {
-        let fix = fix(account::SYSTEM)
-            .map(|fix| format!(". {fix}"))
-            .unwrap_or_default();
-        return format!(
-            "`none` was older cam's name for Claude Code's own setup, which is `system` now{fix}"
-        );
-    }
     let add = format!("add \"{name}\" with `cam add {name}`");
     match (account::closest(name, known), named) {
         (Some(close), Named::Arg) => format!("did you mean `{close}`? Or {add}"),
@@ -322,14 +307,6 @@ mod tests {
         assert_eq!(
             unknown_hint("client", known, Named::Arg),
             "add it with `cam add client`"
-        );
-        assert_eq!(
-            unknown_hint("none", ["nine"], Named::Marker(dir)),
-            "`none` was older cam's name for Claude Code's own setup, which is `system` now. Fix it with `cam use system --dir /home/me/Work`"
-        );
-        assert_eq!(
-            unknown_hint("none", known, Named::Arg),
-            "`none` was older cam's name for Claude Code's own setup, which is `system` now"
         );
     }
 
