@@ -350,7 +350,12 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 6. Shell completions.
 7. **Native logins (done 2026-11-15):** an account is an empty config dir with its own login, and shares nothing yet. `add`/`login`/`remove` through `claude auth`, `system` in place of `none`, no `default`, `list`/`whoami`/`doctor` from Claude Code's own record. The Keychain store, the token prompt and `token_created` go.
 8. **Sharing (done 2026-11-23):** the four groups, the picker and `--share`, `share` (moving copies aside) and `unshare` (with `--copy`), links topped up by every launch and `login` with `exec`'s warning, and `doctor`'s link checks. The file links held in a session first (see the notes under Why another one).
-9. A release (cargo-dist / Homebrew tap). Not planned yet.
+9. **A release (in progress, 2026-11-23):** cargo-dist 0.34 builds on a version tag, from `dist-workspace.toml` and `.github/workflows/release.yml`:
+   - Archives for macOS arm64 and x86_64 and Linux x86_64 and arm64, with checksums, on GitHub Releases. The Linux builds use glibc and are made on Ubuntu 22.04, so they need glibc 2.35 or newer. No Windows build, since cam is Unix only.
+   - A shell installer that puts `cam` in `~/.local/bin`, which Claude Code's own installer already has on `PATH`.
+   - The Homebrew formula `cam`, pushed to the `brunorodmoreira/homebrew-tap` repo with a token that can write only there (the `HOMEBREW_TAP_TOKEN` secret): `brew install brunorodmoreira/tap/cam`.
+   - The crate `cam-cli` on crates.io, published by hand with `cargo publish`.
+   - Release notes from `CHANGELOG.md`. Linux ships although no real Claude Code session has been tried there, which the README says.
 
 Later ideas: Linux (the design no longer needs a secret store, and the whole test suite passes on Debian, run by CI too, but no real session has been tried *(verify)*), and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
 
@@ -363,7 +368,7 @@ Later ideas: Linux (the design no longer needs a secret store, and the whole tes
 - **An exported `CLAUDE_CONFIG_DIR`:** should accounts share from it instead of `~/.claude`? For now they share `~/.claude`, and `doctor` warns.
 - **Logical vs physical cwd:** should the walk-up honour `$PWD` when it points at the current directory, as `pwd -L` does? Then markers above a symlinked folder would apply. M1 uses the physical path.
 - Do the VS Code and JetBrains extensions honour a `claude` on PATH?
-- **Name (settled 2026-11-11):** renamed from `clam` to `cam`. On crates.io, `clam` is a template engine, and [`clam-cli`](https://crates.io/crates/clam-cli) ([jose2kk/clam](https://github.com/jose2kk/clam)) is also a Claude Code profile manager. The crate `cam` is taken by an unrelated camera library, so the package is `cam-cli` and the binary is `cam`. `Cargo.toml` keeps `publish = false` until a release. When Linux support comes, check for a clash with libcamera's `cam` utility.
+- **Name (settled 2026-11-11):** renamed from `clam` to `cam`. On crates.io, `clam` is a template engine, and [`clam-cli`](https://crates.io/crates/clam-cli) ([jose2kk/clam](https://github.com/jose2kk/clam)) is also a Claude Code profile manager. The crate `cam` is taken by an unrelated camera library, so the package is `cam-cli` and the binary is `cam`. `Cargo.toml` had `publish = false` until the release work, which dropped it. When Linux support comes, check for a clash with libcamera's `cam` utility.
 - **Answered 2026-11-23:** the org caches token mode left in `~/.claude` (`remote-settings.json`, `policy-limits.json` and their `.signature*`, `.stamp` and `.synced-at` files) were never rewritten by sessions of a personal system login after token mode ended, so they were leftovers. Deleting them, after a backup, is safe.
 - **Decided 2026-11-23, building M8:**
   - Files cam creates in `~/.claude` are 0600 and folders 0700, since they can hold prompts and transcripts.
