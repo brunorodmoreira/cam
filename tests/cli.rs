@@ -34,7 +34,12 @@ impl Sandbox {
 
     fn with_config(config: Option<&str>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
+        // The physical path, as cam sees it: through /var's symlink on
+        // macOS, and past 8.3 names like RUNNER~1 on Windows, which also
+        // adds a `\\?\` prefix that cam never prints.
         let root = fs::canonicalize(tmp.path()).unwrap();
+        #[cfg(windows)]
+        let root = PathBuf::from(root.to_str().unwrap().strip_prefix(r"\\?\").unwrap());
         let config_path = root.join("cam-config.toml");
         if let Some(text) = config {
             fs::write(&config_path, text).unwrap();
@@ -187,6 +192,24 @@ fn launched(claude: &Path, argv: &str, config: &str, account: &str, depth: u32) 
         "claude: {}\nargv:{argv}\nconfig: {config}\naccount: {account}\ndepth: {depth}\n",
         claude.display()
     )
+}
+
+/// Removes a file or a link. Windows removes a link to a folder as a
+/// folder.
+fn remove_link(path: impl AsRef<Path>) {
+    let path = path.as_ref();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if fs::symlink_metadata(path)
+            .unwrap()
+            .file_type()
+            .is_symlink_dir()
+        {
+            return fs::remove_dir(path).unwrap();
+        }
+    }
+    fs::remove_file(path).unwrap();
 }
 
 fn read(path: &Path) -> String {
@@ -2608,7 +2631,7 @@ fn exec_tops_up_links_and_leaves_the_accounts_own_files() {
     // keybindings.json waits until Claude Code's own setup has one.
     assert!(fs::symlink_metadata(dir.join("keybindings.json")).is_err());
     sb.claude_file("keybindings.json", "{\"bindings\": []}\n");
-    fs::remove_file(dir.join("rules")).unwrap();
+    remove_link(dir.join("rules"));
     sb.cam(&sb.dir("work")).arg("exec").assert().success();
     assert_linked(&sb, &dir, &["keybindings.json", "rules"]);
 }
@@ -2695,7 +2718,7 @@ fn share_links_again_what_claude_code_replaced() {
         .success()
         .stdout("work shares settings again: linked settings.json, plugins, hooks\n");
     // A link replaced by a file, as a save that renames over it would.
-    fs::remove_file(dir.join("settings.json")).unwrap();
+    remove_link(dir.join("settings.json"));
     fs::write(dir.join("settings.json"), "{}\n").unwrap();
     let out = stdout_of(
         &sb.cam(&sb.root)
@@ -2772,7 +2795,7 @@ fn unshare_removes_only_links() {
     let dir = sb.logged_in("work", "you@company.com");
     let keep = sb.claude_file("skills/keep.md", "mine\n");
     sb.cam(&sb.root).args(["login", "work"]).assert().success();
-    fs::remove_file(dir.join("agents")).unwrap();
+    remove_link(dir.join("agents"));
     fs::create_dir(dir.join("agents")).unwrap();
     sb.cam(&sb.root)
         .args(["unshare", "work", "skills"])
@@ -2904,9 +2927,9 @@ fn doctor_checks_the_links() {
         .args(["login", "personal"])
         .assert()
         .success();
-    fs::remove_file(work.join("settings.json")).unwrap();
+    remove_link(work.join("settings.json"));
     fs::write(work.join("settings.json"), "{}\n").unwrap();
-    fs::remove_file(work.join("agents")).unwrap();
+    remove_link(work.join("agents"));
     fs::write(work.join("settings.json.before-share-2026-11-20"), "{}\n").unwrap();
     assert_linked(&sb, &personal, &["CLAUDE.md", "rules"]);
     let out = any_days(&stdout_of(
