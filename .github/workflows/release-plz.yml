@@ -1,0 +1,82 @@
+name: Release-plz
+
+# Runs on every push to main.
+# - release-pr keeps one pull request open that bumps the version and adds its
+#   CHANGELOG section, from the titles of the pull requests merged since the
+#   last release (see release-plz.toml).
+# - release does nothing until that pull request merges. Then it publishes the
+#   crate to crates.io and pushes the v<version> tag, which starts release.yml
+#   (cargo-dist): the archives, the GitHub release, the install script and the
+#   Homebrew formula.
+#
+# Both act through a token from the repo's GitHub App: a tag or pull request
+# made with the workflow's own token doesn't start other workflows, so the tag
+# wouldn't start release.yml and the pull request wouldn't get its CI checks.
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release:
+    name: Release
+    if: github.repository_owner == 'brunorodmoreira'
+    runs-on: ubuntu-latest
+    # crates.io's trusted publisher names this environment, which only main
+    # can deploy to.
+    environment: release
+    permissions:
+      contents: read
+      # crates.io's trusted publishing: release-plz trades GitHub's OIDC token
+      # for a short-lived crates.io token, so none is stored.
+      id-token: write
+    concurrency:
+      group: release-plz-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: read
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+
+  release-pr:
+    name: Release PR
+    if: github.repository_owner == 'brunorodmoreira'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: false
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
