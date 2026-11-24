@@ -9,12 +9,12 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process;
 
 use crate::discover::{is_executable, same_file};
 use crate::error::Error;
+use crate::platform;
 
 /// The name the shim answers to.
 pub const NAME: &str = "claude";
@@ -22,12 +22,12 @@ const CAM: &str = "cam";
 
 /// `~/.local/share/cam/shims`.
 pub fn default_dir(home: Option<PathBuf>) -> Option<PathBuf> {
-    home.map(|home| home.join(".local/share/cam/shims"))
+    home.map(|home| home.join(".local").join("share").join("cam").join("shims"))
 }
 
 /// Whether cam was started as `claude`, i.e. through the shim.
 pub fn invoked_as_shim(argv0: &OsStr) -> bool {
-    Path::new(argv0).file_name() == Some(OsStr::new(NAME))
+    platform::is_named(Path::new(argv0), NAME)
 }
 
 /// What the shim should point at: the `cam` on `PATH` if it is this very
@@ -73,7 +73,7 @@ pub fn install(dir: &Path, target: &Path, own_exe: &Path) -> Result<Installed, E
     // Link under a temporary name, then rename over: the swap is atomic.
     let tmp = dir.join(format!(".{NAME}.cam-{}", process::id()));
     let _ = fs::remove_file(&tmp);
-    symlink(target, &tmp)
+    platform::symlink(target, &tmp)
         .and_then(|()| fs::rename(&tmp, &path))
         .map_err(|err| {
             let _ = fs::remove_file(&tmp);
@@ -146,9 +146,11 @@ pub fn first_on_path(path: Option<&OsStr>, own_exe: &Path) -> Reaches {
     }
 }
 
-#[cfg(test)]
+// Unix for now: on Windows the shim is another kind of file, with tests of
+// its own (see DESIGN.md, Windows).
+#[cfg(all(test, unix))]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use super::*;
     use crate::testutil::Tree;

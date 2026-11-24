@@ -14,6 +14,7 @@ mod error;
 mod init;
 mod launch;
 mod marker;
+mod platform;
 mod redact;
 mod resolve;
 mod settings;
@@ -21,9 +22,6 @@ mod share;
 mod shim;
 #[cfg(test)]
 mod testutil;
-
-#[cfg(not(unix))]
-compile_error!("cam supports Unix only (macOS first); see DESIGN.md");
 
 use std::env;
 use std::ffi::OsString;

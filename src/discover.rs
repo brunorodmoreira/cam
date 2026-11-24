@@ -4,18 +4,19 @@
 //!    cam itself.
 //! 2. Otherwise the first executable `claude` on `PATH`, skipping relative
 //!    entries, the shim dir, and any `claude` that is cam's own executable
-//!    (through a symlink or a hard link).
+//!    (through a symlink or a hard link). On Windows, `claude` is
+//!    `claude.exe`, `claude.cmd` and the rest of `PATHEXT`, in that order.
 //!
 //! Resolved on every launch and never cached: `~/.local/bin/claude` is a
 //! symlink that Claude Code's updater repoints.
 
 use std::env;
 use std::ffi::OsStr;
-use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
+use crate::platform::executable_names;
+pub use crate::platform::{is_executable, same_file};
 
 pub const ENV_CLAUDE_BIN: &str = "CAM_CLAUDE_BIN";
 const BINARY: &str = "claude";
@@ -41,7 +42,11 @@ pub fn real_claude(search: &Search) -> Result<PathBuf, Error> {
         // `claude` that a repo ships must never be what cam runs.
         .filter(|dir| dir.is_absolute())
         .filter(|dir| !search.shim_dir.is_some_and(|shim| same_file(dir, shim)))
-        .map(|dir| dir.join(BINARY))
+        .flat_map(|dir| {
+            executable_names(BINARY)
+                .into_iter()
+                .map(move |name| dir.join(name))
+        })
         .find(|candidate| is_executable(candidate) && !same_file(candidate, search.own_exe))
         .ok_or(Error::ClaudeNotFound)
 }
@@ -65,28 +70,28 @@ fn from_env(path: &Path, own_exe: &Path) -> Result<PathBuf, Error> {
     Ok(path.to_owned())
 }
 
-/// A regular file, after following symlinks, with an execute bit set.
-pub fn is_executable(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-}
-
-/// Whether `a` and `b` are the same file or directory, following symlinks.
-/// Comparing device and inode also catches hard links.
-pub fn same_file(a: &Path, b: &Path) -> bool {
-    a == b
-        || match (fs::metadata(a), fs::metadata(b)) {
-            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
-            _ => false,
-        }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-    use std::os::unix::fs::symlink;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     use super::*;
     use crate::testutil::Tree;
+
+    /// A command's file name as discovery finds it: `claude` on Unix,
+    /// `claude.exe` on Windows.
+    fn exe(command: &str) -> String {
+        match cfg!(windows) {
+            true => format!("{command}.exe"),
+            false => command.to_owned(),
+        }
+    }
+
+    /// The `claude` in `dir`.
+    fn claude_in(dir: &Path) -> PathBuf {
+        dir.join(exe(BINARY))
+    }
 
     /// A tree with `own/cam` standing in for cam's executable.
     struct Fixture {
@@ -97,7 +102,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let tree = Tree::new();
-            let own_exe = tree.dir("own").join("cam");
+            let own_exe = tree.dir("own").join(exe("cam"));
             write_exe(&own_exe);
             Self { tree, own_exe }
         }
@@ -105,7 +110,7 @@ mod tests {
         /// Writes an executable `claude` in `rel` and returns the dir.
         fn claude(&self, rel: &str) -> PathBuf {
             let dir = self.tree.dir(rel);
-            write_exe(&dir.join(BINARY));
+            write_exe(&claude_in(&dir));
             dir
         }
 
@@ -131,6 +136,7 @@ mod tests {
 
     fn write_exe(path: &Path) {
         fs::write(path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
@@ -138,26 +144,41 @@ mod tests {
     fn first_executable_on_path_wins() {
         let fx = Fixture::new();
         let (a, b) = (fx.claude("a"), fx.claude("b"));
-        assert_eq!(fx.find(&[&a, &b]).unwrap(), a.join(BINARY));
-        assert_eq!(fx.find(&[&b, &a]).unwrap(), b.join(BINARY));
+        assert_eq!(fx.find(&[&a, &b]).unwrap(), claude_in(&a));
+        assert_eq!(fx.find(&[&b, &a]).unwrap(), claude_in(&b));
     }
 
     #[test]
     fn skips_missing_non_executable_and_directories() {
         let fx = Fixture::new();
         let empty = fx.tree.dir("empty");
+        // No execute bit on Unix. On Windows, no extension, as the shell
+        // script npm puts beside `claude.cmd`.
         let no_exec = fx.tree.dir("no-exec");
         fs::write(no_exec.join(BINARY), "#!/bin/sh\n").unwrap();
-        let is_dir = fx.tree.dir("is-dir/claude");
+        let is_dir = fx.tree.dir(&format!("is-dir/{}", exe(BINARY)));
         let is_dir = is_dir.parent().unwrap();
         let real = fx.claude("real");
         assert_eq!(
             fx.find(&[&empty, &fx.tree.root.join("gone"), &no_exec, is_dir, &real])
                 .unwrap(),
-            real.join(BINARY)
+            claude_in(&real)
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn finds_claude_cmd_after_claude_exe() {
+        let fx = Fixture::new();
+        let npm = fx.tree.dir("npm");
+        write_exe(&npm.join("claude.cmd"));
+        let both = fx.claude("both");
+        write_exe(&both.join("claude.cmd"));
+        assert_eq!(fx.find(&[&npm]).unwrap(), npm.join("claude.cmd"));
+        assert_eq!(fx.find(&[&both]).unwrap(), claude_in(&both));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn follows_symlinks_to_the_real_binary() {
         let fx = Fixture::new();
@@ -169,32 +190,47 @@ mod tests {
     }
 
     #[test]
-    fn skips_cam_itself_through_symlinks_and_hard_links() {
+    fn skips_cam_itself_through_links() {
         let fx = Fixture::new();
-        let soft = fx.tree.dir("soft");
-        symlink(&fx.own_exe, soft.join(BINARY)).unwrap();
         let hard = fx.tree.dir("hard");
-        fs::hard_link(&fx.own_exe, hard.join(BINARY)).unwrap();
+        fs::hard_link(&fx.own_exe, claude_in(&hard)).unwrap();
+        let mut path = vec![hard];
+        #[cfg(unix)]
+        {
+            let soft = fx.tree.dir("soft");
+            symlink(&fx.own_exe, claude_in(&soft)).unwrap();
+            path.push(soft);
+        }
         let real = fx.claude("real");
-        assert_eq!(fx.find(&[&soft, &hard, &real]).unwrap(), real.join(BINARY));
+        path.push(real.clone());
+        let path: Vec<&Path> = path.iter().map(PathBuf::as_path).collect();
+        assert_eq!(fx.find(&path).unwrap(), claude_in(&real));
     }
 
     #[test]
     fn skips_the_shim_dir_however_it_is_spelled() {
         let fx = Fixture::new();
         let shims = fx.claude("shims");
-        let alias = fx.tree.root.join("alias");
+        // Through a symlink on Unix. Windows ignores case in names.
+        let alias = match cfg!(windows) {
+            true => fx.tree.root.join("SHIMS"),
+            false => fx.tree.root.join("alias"),
+        };
+        #[cfg(unix)]
         symlink(&shims, &alias).unwrap();
         let real = fx.claude("real");
         for spelling in [&shims, &alias] {
             assert_eq!(
                 fx.find_with(None, &[spelling, &real], Some(&shims))
                     .unwrap(),
-                real.join(BINARY)
+                claude_in(&real)
             );
         }
     }
 
+    /// Unix only: on Windows, the temp dir and the working dir can be on
+    /// different drives, with no relative path between them.
+    #[cfg(unix)]
     #[test]
     fn never_uses_relative_entries() {
         let fx = Fixture::new();
@@ -207,14 +243,14 @@ mod tests {
         assert!(Path::new(&relative).join(BINARY).is_file());
 
         let real = fx.claude("real");
-        let path = OsString::from(format!(":.:{relative}:{}", real.display()));
+        let path = std::ffi::OsString::from(format!(":.:{relative}:{}", real.display()));
         let found = real_claude(&Search {
             claude_bin: None,
             path: Some(&path),
             own_exe: &fx.own_exe,
             shim_dir: None,
         });
-        assert_eq!(found.unwrap(), real.join(BINARY));
+        assert_eq!(found.unwrap(), claude_in(&real));
     }
 
     #[test]
@@ -235,7 +271,7 @@ mod tests {
     fn claude_bin_beats_path() {
         let fx = Fixture::new();
         let on_path = fx.claude("on-path");
-        let chosen = fx.claude("chosen").join(BINARY);
+        let chosen = claude_in(&fx.claude("chosen"));
         assert_eq!(
             fx.find_with(Some(chosen.as_os_str()), &[&on_path], None)
                 .unwrap(),
@@ -245,7 +281,7 @@ mod tests {
         assert_eq!(
             fx.find_with(Some(OsStr::new("")), &[&on_path], None)
                 .unwrap(),
-            on_path.join(BINARY)
+            claude_in(&on_path)
         );
     }
 
@@ -270,8 +306,11 @@ mod tests {
             find(plain.as_os_str()),
             Err(Error::ClaudeBinMissing { .. })
         ));
-        let link = fx.tree.root.join("link-to-cam");
+        let link = fx.tree.root.join(exe("link-to-cam"));
+        #[cfg(unix)]
         symlink(&fx.own_exe, &link).unwrap();
+        #[cfg(windows)]
+        fs::hard_link(&fx.own_exe, &link).unwrap();
         assert!(matches!(
             find(link.as_os_str()),
             Err(Error::ClaudeBinIsCam { .. })

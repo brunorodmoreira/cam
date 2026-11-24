@@ -6,7 +6,6 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -23,6 +22,7 @@ use crate::error::{Error, Named, unknown_hint};
 use crate::init::{self, Shell};
 use crate::launch::{self, ENV_ACTIVE, ENV_CONFIG_DIR, ENV_DEPTH, Target};
 use crate::marker::{self, FILE_NAME};
+use crate::platform;
 use crate::redact::redact;
 use crate::resolve;
 use crate::settings;
@@ -1137,8 +1137,8 @@ pub fn doctor(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `cam exec`: resolves the account, then replaces cam with the real
-/// `claude`. Returns only on failure.
+/// `cam exec`: resolves the account, then runs the real `claude` in cam's
+/// place (see [`platform::run_instead`]). Returns only on failure.
 pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
     // First, so a loop stops before doing any work.
     let depth = depth()?;
@@ -1167,7 +1167,7 @@ pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
             Target::Account { name, dir: &dir }
         }
     };
-    let source = claude(&program, args, target, depth).exec();
+    let source = platform::run_instead(claude(&program, args, target, depth));
     Err(Error::Exec {
         path: program,
         source,

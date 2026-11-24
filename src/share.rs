@@ -7,14 +7,14 @@
 //! shared folder or file in `~/.claude`, empty.
 
 use std::fmt;
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use serde::de::{self, Deserialize, Deserializer};
 
 use crate::account;
+use crate::platform;
 
 /// Claude Code's own setup, under the home dir. Accounts share from here,
 /// even when the user exports `CLAUDE_CONFIG_DIR` (see DESIGN.md).
@@ -380,7 +380,7 @@ pub fn top_up(home: &Path, account_dir: &Path, groups: &[Group]) -> TopUp {
 fn link(home: &Path, account_dir: &Path, entry: Entry) -> io::Result<()> {
     let target = shared_path(home, entry);
     ensure_shared(home, &target, entry)?;
-    match symlink(&target, account_dir.join(entry.name)) {
+    match platform::symlink(&target, &account_dir.join(entry.name)) {
         // Another launch got there first.
         Err(err)
             if err.kind() == io::ErrorKind::AlreadyExists
@@ -398,10 +398,7 @@ fn link(home: &Path, account_dir: &Path, entry: Entry) -> io::Result<()> {
 fn ensure_shared(home: &Path, target: &Path, entry: Entry) -> io::Result<()> {
     let shared = home.join(SHARED_DIR);
     if !account::exists(&shared) {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&shared)?;
+        platform::private_dir().recursive(true).create(&shared)?;
     }
     let ignore_exists = |result: io::Result<()>| match result {
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(()),
@@ -415,17 +412,16 @@ fn ensure_shared(home: &Path, target: &Path, entry: Entry) -> io::Result<()> {
                 target.display()
             ))),
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                ignore_exists(DirBuilder::new().mode(0o700).create(target))
+                ignore_exists(platform::private_dir().create(target))
             }
             Err(err) => Err(err),
         },
         Kind::File(empty) => match fs::symlink_metadata(target) {
             Ok(_) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => ignore_exists(
-                OpenOptions::new()
+                platform::private_file()
                     .write(true)
                     .create_new(true)
-                    .mode(0o600)
                     .open(target)
                     .and_then(|mut file| file.write_all(empty.as_bytes())),
             ),
@@ -492,11 +488,11 @@ pub fn unlink(home: &Path, account_dir: &Path, entry: Entry, copy: bool) -> io::
                     let _ = remove_any(&tmp);
                     return Err(err);
                 }
-                fs::remove_file(&path)?;
+                platform::remove_link(&path)?;
                 fs::rename(&tmp, &path)?;
                 Ok(Unlinked::Copied)
             } else {
-                fs::remove_file(&path)?;
+                platform::remove_link(&path)?;
                 Ok(Unlinked::Removed)
             }
         }
@@ -508,6 +504,7 @@ pub fn unlink(home: &Path, account_dir: &Path, entry: Entry, copy: bool) -> io::
 /// is fine.
 fn remove_any(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => platform::remove_link(path),
         Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
         Ok(_) => fs::remove_file(path),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -521,33 +518,29 @@ fn remove_any(path: &Path) -> io::Result<()> {
 pub fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
     let meta = fs::metadata(from)?;
     if meta.is_dir() {
-        copy_dir(from, to, meta.permissions().mode())
+        copy_dir(from, to, meta.permissions())
     } else {
         fs::copy(from, to).map(drop)
     }
 }
 
-fn copy_dir(from: &Path, to: &Path, mode: u32) -> io::Result<()> {
-    // Writable while it's filled, then given the original's mode.
-    DirBuilder::new().mode(0o700).create(to)?;
+fn copy_dir(from: &Path, to: &Path, permissions: fs::Permissions) -> io::Result<()> {
+    // Writable while it's filled, then given the original's permissions.
+    platform::private_dir().create(to)?;
     for item in fs::read_dir(from)? {
         let item = item?;
         let (source, dest) = (item.path(), to.join(item.file_name()));
         let kind = item.file_type()?;
         if kind.is_symlink() {
-            symlink(fs::read_link(&source)?, &dest)?;
+            platform::copy_link(&source, &dest)?;
         } else if kind.is_dir() {
-            copy_dir(
-                &source,
-                &dest,
-                fs::symlink_metadata(&source)?.permissions().mode(),
-            )?;
+            copy_dir(&source, &dest, fs::symlink_metadata(&source)?.permissions())?;
         } else if kind.is_file() {
             fs::copy(&source, &dest)?;
         }
         // Sockets and pipes are left out.
     }
-    fs::set_permissions(to, fs::Permissions::from_mode(mode))
+    fs::set_permissions(to, permissions)
 }
 
 /// The bytes [`copy_tree`] would copy from `path`.
@@ -613,8 +606,12 @@ pub fn preview(home: &Path, group: Group) -> String {
     }
 }
 
-#[cfg(test)]
+// Unix for now: Windows makes other kinds of links, with tests of their own
+// (see DESIGN.md, Windows).
+#[cfg(all(test, unix))]
 mod tests {
+    use std::os::unix::fs::symlink;
+
     use super::*;
     use crate::testutil::Tree;
 

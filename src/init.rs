@@ -104,6 +104,7 @@ fn fish_quote(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     const SHIMS: &str = "/home/me/.local/share/cam/shims";
 
     #[test]
@@ -121,6 +122,8 @@ mod tests {
         assert_eq!(Shell::from_env(None), None);
     }
 
+    // Unix `PATH`s: Windows splits on `;`.
+    #[cfg(unix)]
     #[test]
     fn path_comes_first_and_only_once() {
         let path = OsStr::new("/home/me/.local/bin:/home/me/.local/share/cam/shims/:/usr/bin");
@@ -138,6 +141,8 @@ mod tests {
         );
     }
 
+    // Unix `PATH`s: Windows splits on `;`.
+    #[cfg(unix)]
     #[test]
     fn path_keeps_other_entries_as_they_are() {
         // Empty entries and duplicates are the user's business.
@@ -161,6 +166,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_path_that_is_not_utf8_is_kept() {
         use std::os::unix::ffi::OsStrExt;

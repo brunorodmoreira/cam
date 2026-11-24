@@ -41,7 +41,7 @@ pub fn path(env: Option<OsString>, home: Option<PathBuf>) -> Result<PathBuf, Err
     match env {
         Some(path) if !path.is_empty() => Ok(PathBuf::from(path)),
         _ => home
-            .map(|home| home.join(".config/cam/config.toml"))
+            .map(|home| home.join(".config").join("cam").join("config.toml"))
             .ok_or(Error::NoHome),
     }
 }
@@ -469,6 +469,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn writes_through_a_symlink() {
         let tree = Tree::new();
@@ -487,6 +488,7 @@ mod tests {
         assert!(read(&real).contains("[accounts.work]"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn keeps_file_permissions() {
         use std::os::unix::fs::PermissionsExt;
@@ -498,6 +500,7 @@ mod tests {
         assert_eq!(mode, 0o600);
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_write_leaves_no_temp_file() {
         use std::os::unix::fs::PermissionsExt;

@@ -4,6 +4,9 @@
 //! `PATH` and `FAKE_LOG`, all inside a temp dir. So the real config,
 //! markers, accounts and `claude` are never touched. The `claude` cam finds
 //! is [`FAKE_CLAUDE`], which keeps a fake login in the config dir it gets.
+//!
+//! Unix only for now: [`FAKE_CLAUDE`] is a shell script.
+#![cfg(unix)]
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};

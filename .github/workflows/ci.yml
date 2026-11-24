@@ -18,6 +18,7 @@ env:
 jobs:
   check:
     # The check names, macOS and Linux, are what main's ruleset requires.
+    # Windows joins them once Windows is supported (DESIGN.md, Windows).
     name: ${{ matrix.name }}
     strategy:
       fail-fast: false
@@ -30,6 +31,8 @@ jobs:
             runner: macos-15-intel
           - name: Linux
             runner: ubuntu-latest
+          - name: Windows
+            runner: windows-latest
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
