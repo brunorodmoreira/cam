@@ -1,14 +1,17 @@
 //! End-to-end tests for the `cam` binary.
 //!
-//! Every command runs with a cleared environment: only `CAM_CONFIG`, `HOME`,
-//! `PATH` and `FAKE_LOG`, all inside a temp dir. So the real config,
-//! markers, accounts and `claude` are never touched. The `claude` cam finds
-//! is [`FAKE_CLAUDE`], which keeps a fake login in the config dir it gets.
+//! Every command runs with a cleared environment: only `CAM_CONFIG`, `HOME`
+//! (and `USERPROFILE`, its Windows counterpart), `PATH` and `FAKE_LOG`, all
+//! inside a temp dir. So the real config, markers, accounts and `claude` are
+//! never touched. The `claude` cam finds is the fake in
+//! `examples/fake_claude.rs`, which keeps a fake login in the config dir it
+//! gets. `cargo test` builds it.
 //!
-//! Unix only for now: [`FAKE_CLAUDE`] is a shell script.
-#![cfg(unix)]
+//! Tests of shell code, Unix symlinks and permissions are Unix only.
 
+use std::env::consts::EXE_SUFFIX;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
@@ -68,6 +71,7 @@ impl Sandbox {
             .env_clear()
             .env("CAM_CONFIG", &self.config)
             .env("HOME", self.home())
+            .env("USERPROFILE", self.home())
             .env("PATH", self.bin())
             .env("FAKE_LOG", self.root.join("claude.log"));
         cmd
@@ -82,12 +86,16 @@ impl Sandbox {
         self.root.join("bin")
     }
 
-    /// Writes [`FAKE_CLAUDE`] as `<rel>/claude` and returns its path.
+    /// Puts the fake `claude` in `rel` (`claude.exe` on Windows) and
+    /// returns its path.
     fn fake_claude(&self, rel: &str) -> PathBuf {
-        self.script(rel, FAKE_CLAUDE)
+        let path = self.dir(rel).join(format!("claude{EXE_SUFFIX}"));
+        fs::copy(fake_claude_exe(), &path).unwrap();
+        path
     }
 
     /// Writes an executable `<rel>/claude` with `body` and returns its path.
+    #[cfg(unix)]
     fn script(&self, rel: &str, body: &str) -> PathBuf {
         let path = self.dir(rel).join("claude");
         fs::write(&path, body).unwrap();
@@ -96,8 +104,9 @@ impl Sandbox {
     }
 
     /// The default shim dir under the sandbox's `HOME`.
+    #[cfg(unix)]
     fn shims(&self) -> PathBuf {
-        self.root.join("home/.local/share/cam/shims")
+        cam_path(&self.home(), &[".local", "share", "cam", "shims"])
     }
 
     /// `PATH` made of these sandbox dirs, in order.
@@ -107,11 +116,11 @@ impl Sandbox {
 
     /// Where cam keeps account `name`.
     fn account_dir(&self, name: &str) -> PathBuf {
-        self.home().join(".local/share/cam/accounts").join(name)
+        cam_path(&self.home(), &[".local", "share", "cam", "accounts", name])
     }
 
     /// Creates account `name`'s dir, logged in as `email` the way
-    /// [`FAKE_CLAUDE`] records a login, and returns the dir.
+    /// the fake `claude` records a login, and returns the dir.
     fn logged_in(&self, name: &str, email: &str) -> PathBuf {
         let dir = self.account_dir(name);
         fs::create_dir_all(&dir).unwrap();
@@ -124,13 +133,37 @@ impl Sandbox {
         fake_login(&self.home().join(".claude.json"), email);
     }
 
-    /// What [`FAKE_CLAUDE`] was asked to do, one line per `auth` call.
+    /// What the fake `claude` was asked to do, one line per `auth` call.
     fn log(&self) -> String {
         fs::read_to_string(self.root.join("claude.log")).unwrap_or_default()
     }
 }
 
-/// Records a login as [`FAKE_CLAUDE`] does: the email in `.claude.json`,
+/// `base` joined with `parts` one at a time, as cam builds its paths, so
+/// they print the same on Windows.
+fn cam_path(base: &Path, parts: &[&str]) -> PathBuf {
+    let mut path = base.to_owned();
+    path.extend(parts);
+    path
+}
+
+/// The fake `claude` that `cargo test` builds from
+/// `examples/fake_claude.rs`, next to cam.
+fn fake_claude_exe() -> PathBuf {
+    let path = Path::new(CAM)
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join(format!("fake_claude{EXE_SUFFIX}"));
+    assert!(
+        path.is_file(),
+        "{} is missing: run the tests with plain `cargo test`, or build it with `cargo build --example fake_claude`",
+        path.display()
+    );
+    path
+}
+
+/// Records a login as the fake `claude` does: the email in `.claude.json`,
 /// where `cam list` reads it, and in a file next to it for `auth status`.
 fn fake_login(json: &Path, email: &str) {
     fs::write(
@@ -148,85 +181,7 @@ const CAM: &str = env!("CARGO_BIN_EXE_cam");
 /// What `add work` and `login work` say before the browser opens.
 const LOGGING_WORK: &str = "Logging work in with Claude Code. It uses the claude.ai account your browser is signed in to.\n";
 
-/// A stand-in for `claude`. `auth login`, `auth status` and `auth logout`
-/// act on a fake login in `$CLAUDE_CONFIG_DIR`, or in `$HOME` for Claude
-/// Code's own setup, and log the call to `$FAKE_LOG`. Anything else prints
-/// its path, its argv and cam's variables, and exits with `$FAKE_EXIT`.
-/// Shell builtins only, since the sandbox `PATH` has nothing else.
-///
-/// - `FAKE_LOGIN=fail` makes the login fail; `nothing` makes it succeed
-///   without logging in.
-/// - `FAKE_EMAIL` is the email a login gets (default: `<account>@example.com`).
-/// - `FAKE_ORG` is the org a login gets (default: `Acme`).
-/// - `auth login --console` makes a Console login, which `auth status`
-///   reports as an API key, not a claude.ai login.
-/// - `FAKE_EXPIRES` is the `loginExpiresAt` that `auth status` reports.
-/// - `FAKE_LOGOUT=fail` makes the logout fail.
-/// - With `ANTHROPIC_API_KEY` set, `auth status` reports the key instead.
-const FAKE_CLAUDE: &str = r#"#!/bin/sh
-if [ "$1" = auth ] && [ -n "${FAKE_LOG-}" ]; then
-    echo "$* (${CLAUDE_CONFIG_DIR-system})" >> "$FAKE_LOG"
-fi
-if [ -n "${CLAUDE_CONFIG_DIR-}" ]; then
-    json="$CLAUDE_CONFIG_DIR/.claude.json"
-else
-    json="$HOME/.claude.json"
-fi
-case "$1 $2" in
-'auth login')
-    case "${FAKE_LOGIN-}" in
-        fail) echo 'Login cancelled.' >&2; exit 1 ;;
-        nothing) exit 0 ;;
-    esac
-    for arg in "$@"; do
-        if [ "$arg" = --console ]; then
-            : > "$json.console"
-            echo 'Login successful.'
-            exit 0
-        fi
-    done
-    email="${FAKE_EMAIL:-${CAM_ACTIVE_ACCOUNT:-system}@example.com}"
-    printf '{"oauthAccount": {"emailAddress": "%s"}}\n' "$email" > "$json"
-    printf '%s\n' "$email" > "$json.email"
-    printf '%s\n' "${FAKE_ORG:-Acme}" > "$json.org"
-    echo 'Login successful.'
-    exit 0 ;;
-'auth status')
-    if [ -n "${ANTHROPIC_API_KEY-}" ]; then
-        echo '{"loggedIn": true, "authMethod": "api_key", "apiKeySource": "ANTHROPIC_API_KEY"}'
-        exit 0
-    fi
-    if [ -e "$json.console" ]; then
-        echo '{"loggedIn": true, "authMethod": "api_key", "apiKeySource": "/login managed key"}'
-        exit 0
-    fi
-    if [ -s "$json.email" ]; then
-        read -r email < "$json.email"
-        org=Acme
-        if [ -s "$json.org" ]; then read -r org < "$json.org"; fi
-        printf '{"loggedIn": true, "authMethod": "claude.ai", "email": "%s", "orgName": "%s", "subscriptionType": "team", "loginExpiresAt": "%s"}\n' \
-            "$email" "$org" "${FAKE_EXPIRES:-2099-01-01T00:00:00.000Z}"
-        exit 0
-    fi
-    echo '{"loggedIn": false, "authMethod": "none", "loginExpiresAt": null}'
-    exit 1 ;;
-'auth logout')
-    if [ "${FAKE_LOGOUT-}" = fail ]; then echo 'Logout failed.' >&2; exit 1; fi
-    : > "$json.email"
-    echo 'Successfully logged out from your Anthropic account.'
-    exit 0 ;;
-esac
-echo "claude: $0"
-printf 'argv:'
-for arg in "$@"; do printf ' [%s]' "$arg"; done
-echo
-echo "config: ${CLAUDE_CONFIG_DIR-unset}"
-echo "account: ${CAM_ACTIVE_ACCOUNT-unset}"
-echo "depth: ${CAM_SHIM_DEPTH-unset}"
-exit "${FAKE_EXIT:-0}"
-"#;
-
-/// What [`FAKE_CLAUDE`] prints when it's started as a session.
+/// What the fake `claude` prints when it's started as a session.
 fn launched(claude: &Path, argv: &str, config: &str, account: &str, depth: u32) -> String {
     format!(
         "claude: {}\nargv:{argv}\nconfig: {config}\naccount: {account}\ndepth: {depth}\n",
@@ -766,8 +721,11 @@ fn add_logs_in_and_records_the_account() {
         .stderr(LOGGING_WORK);
     assert_eq!(read(&sb.config), "[accounts.work]\n");
     let dir = sb.account_dir("work");
-    let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o700);
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
     assert_eq!(
         sb.log(),
         format!(
@@ -777,6 +735,7 @@ fn add_logs_in_and_records_the_account() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn add_skips_the_init_step_once_plain_claude_reaches_cam() {
     let sb = Sandbox::with_config(None);
@@ -1245,6 +1204,7 @@ fn remove_names_the_marker_here_that_now_fails() {
         ));
 }
 
+#[cfg(unix)]
 #[test]
 fn remove_never_follows_links_out_of_the_dir() {
     let sb = Sandbox::new();
@@ -1547,6 +1507,7 @@ fn exec_system_does_not_warn() {
         .stderr("");
 }
 
+#[cfg(unix)]
 #[test]
 fn exec_skips_cam_and_the_shim_dir_on_path() {
     let sb = Sandbox::new();
@@ -1627,6 +1588,7 @@ fn exec_claude_bin_must_exist() {
         .stderr(predicate::str::contains("which is not an executable file"));
 }
 
+#[cfg(unix)]
 #[test]
 fn exec_that_cannot_start_claude_exits_126() {
     let sb = Sandbox::new();
@@ -1645,6 +1607,44 @@ fn exec_that_cannot_start_claude_exits_126() {
         )));
 }
 
+#[cfg(windows)]
+#[test]
+fn exec_that_cannot_start_claude_exits_126() {
+    let sb = Sandbox::new();
+    // Not a program Windows can start, though its name says it is.
+    let claude = sb.bin().join("claude.exe");
+    fs::write(&claude, "not a program\n").unwrap();
+    sb.cam(&sb.root)
+        .arg("exec")
+        .assert()
+        .code(126)
+        .stderr(predicate::str::starts_with(format!(
+            "cam: cannot run {}: ",
+            claude.display()
+        )));
+}
+
+#[cfg(windows)]
+#[test]
+fn exec_stops_a_loop_back_to_cam() {
+    let sb = Sandbox::new();
+    // Two copies of cam named `claude`: each skips itself and finds the
+    // other, so each launch starts another, waiting for it, until the depth
+    // guard stops the last one. Its exit code comes back through them all.
+    let (a, b) = (sb.dir("a"), sb.dir("b"));
+    fs::copy(CAM, a.join("claude.exe")).unwrap();
+    fs::copy(CAM, b.join("claude.exe")).unwrap();
+    sb.cam(&sb.root)
+        .arg("exec")
+        .env("PATH", sb.path(&[&a, &b]))
+        .assert()
+        .code(1)
+        .stderr(
+            "cam: `claude` keeps leading back to cam (CAM_SHIM_DEPTH is 10)\nhint: set CAM_CLAUDE_BIN to the real `claude` binary\n",
+        );
+}
+
+#[cfg(unix)]
 #[test]
 fn exec_stops_a_loop_back_to_cam() {
     let sb = Sandbox::new();
@@ -1676,6 +1676,7 @@ fn exec_help_is_cams() {
 
 /// What `cam init zsh` prints after the `PATH` line: clap's script, run
 /// only once `compinit` has defined `compdef`.
+#[cfg(unix)]
 fn zsh_completions(code: &str) -> &str {
     let at = code
         .find("if (( $+functions[compdef] )); then\n")
@@ -1683,6 +1684,7 @@ fn zsh_completions(code: &str) -> &str {
     &code[at..]
 }
 
+#[cfg(unix)]
 #[test]
 fn init_makes_the_link_and_puts_its_dir_first() {
     let sb = Sandbox::new();
@@ -1710,6 +1712,7 @@ fn init_makes_the_link_and_puts_its_dir_first() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn init_moves_the_dir_to_the_front() {
     let sb = Sandbox::new();
@@ -1726,6 +1729,7 @@ fn init_moves_the_dir_to_the_front() {
     )));
 }
 
+#[cfg(unix)]
 #[test]
 fn init_for_fish() {
     let sb = Sandbox::new();
@@ -1745,6 +1749,7 @@ fn init_for_fish() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn init_in_bash_sends_plain_claude_through_cam() {
     let sb = Sandbox::new();
@@ -1769,6 +1774,7 @@ fn init_in_bash_sends_plain_claude_through_cam() {
         .stderr("");
 }
 
+#[cfg(unix)]
 #[test]
 fn init_in_zsh_sends_plain_claude_through_cam() {
     let zsh = Path::new("/bin/zsh");
@@ -1800,6 +1806,7 @@ fn init_in_zsh_sends_plain_claude_through_cam() {
         .stderr("");
 }
 
+#[cfg(unix)]
 #[test]
 fn init_replaces_an_old_link_quietly() {
     let sb = Sandbox::new();
@@ -1823,6 +1830,7 @@ fn init_replaces_an_old_link_quietly() {
         .stderr("");
 }
 
+#[cfg(unix)]
 #[test]
 fn init_points_at_the_path_spelling_of_cam() {
     let sb = Sandbox::new();
@@ -1839,11 +1847,12 @@ fn init_points_at_the_path_spelling_of_cam() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn init_never_replaces_a_claude_that_isnt_cams() {
     let sb = Sandbox::new();
     let claude = sb.fake_claude("home/.local/share/cam/shims");
-    let before = read(&claude);
+    let before = fs::read(&claude).unwrap();
     let assert = sb
         .cam(&sb.root)
         .args(["init", "zsh"])
@@ -1858,9 +1867,10 @@ fn init_never_replaces_a_claude_that_isnt_cams() {
     let code = stdout_of(&assert);
     assert!(!code.contains("PATH"), "{code}");
     assert_eq!(zsh_completions(&code), code);
-    assert_eq!(read(&claude), before);
+    assert_eq!(fs::read(&claude).unwrap(), before);
 }
 
+#[cfg(unix)]
 #[test]
 fn plain_claude_runs_with_the_account() {
     let sb = Sandbox::new();
@@ -1884,6 +1894,7 @@ fn plain_claude_runs_with_the_account() {
         .stderr("");
 }
 
+#[cfg(unix)]
 #[test]
 fn plain_claude_system_and_exit_code() {
     let sb = Sandbox::new();
@@ -1897,6 +1908,7 @@ fn plain_claude_system_and_exit_code() {
         .stdout(launched(&claude, "", "unset", "unset", 1));
 }
 
+#[cfg(unix)]
 #[test]
 fn plain_claude_without_a_real_one_fails_instead_of_looping() {
     let sb = Sandbox::new();
@@ -1910,6 +1922,7 @@ fn plain_claude_without_a_real_one_fails_instead_of_looping() {
         ));
 }
 
+#[cfg(unix)]
 #[test]
 fn plain_claude_says_how_to_run_without_cam() {
     let sb = Sandbox::new();
@@ -2052,6 +2065,7 @@ fn whoami_without_an_account_dir_fails() {
 
 // --- doctor ---
 
+#[cfg(unix)]
 #[test]
 fn doctor_all_good() {
     let sb = Sandbox::new();
@@ -2208,6 +2222,7 @@ fn doctor_warns_about_an_exported_config_dir() {
         ));
 }
 
+#[cfg(unix)]
 #[test]
 fn doctor_flags_plain_claude_skipping_cam() {
     let sb = Sandbox::with_config(None);
@@ -2330,6 +2345,7 @@ fn completions_with_a_broken_config_still_work() {
 }
 
 /// What bash's completion for `cam` offers for the last of `words`.
+#[cfg(unix)]
 fn bash_completes(script: &Path, words: &[&str]) -> Vec<String> {
     let output = std::process::Command::new("/bin/bash")
         .arg("-c")
@@ -2355,6 +2371,7 @@ fn bash_completes(script: &Path, words: &[&str]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn bash_completes_account_names() {
     let sb = Sandbox::new();
