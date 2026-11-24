@@ -95,8 +95,9 @@ fn pick_groups(name: &str, home: &Path, checked: &[Group]) -> Result<Option<Vec<
         .map(|group| checked.contains(group))
         .collect();
     tell(format_args!(
-        "What should {name} share with your own setup in ~/.claude? A shared group is the same files for both, \
-         so a change in either account shows up in the other. MCP servers are never shared."
+        "What should {name} share with your own setup in ~/.claude?\n\
+         A shared group is the same files for both: a change in either account shows up in the other.\n\
+         MCP servers are never shared."
     ));
     let picked = dialoguer::MultiSelect::with_theme(&dialoguer::theme::ColorfulTheme::default())
         .with_prompt("Space ticks, Enter confirms; nothing ticked shares nothing")
@@ -447,10 +448,12 @@ fn next_steps(name: &str, reached: bool, shell: Option<Shell>, shares: &[Group])
     lines.push(String::new());
     lines.push(match shares {
         [] => format!(
-            "{name} starts with an empty Claude Code setup of its own: its first session shows the first-run screens, and your settings, CLAUDE.md, skills and MCP servers in ~/.claude aren't there."
+            "{name} starts with an empty Claude Code setup of its own.\n\
+             Its first session shows the first-run screens, without your settings, CLAUDE.md, skills or MCP servers."
         ),
         _ => format!(
-            "Apart from {}, {name} starts with an empty Claude Code setup of its own: its first session shows the first-run screens, and your MCP servers aren't there.",
+            "Apart from {}, {name} starts with an empty Claude Code setup of its own.\n\
+             Its first session shows the first-run screens, without your MCP servers.",
             share::describe(shares)
         ),
     });
@@ -1366,9 +1369,7 @@ mod tests {
             "{none}"
         );
         assert!(
-            none.contains(
-                "your settings, CLAUDE.md, skills and MCP servers in ~/.claude aren't there"
-            ),
+            none.contains("without your settings, CLAUDE.md, skills or MCP servers"),
             "{none}"
         );
         let some = next_steps("work", true, None, &[Group::Settings, Group::Skills]).join("\n");

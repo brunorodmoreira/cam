@@ -757,8 +757,8 @@ fn add_logs_in_and_records_the_account() {
                eval \"$(cam init zsh)\"  at the end of ~/.zshrc, so plain `claude` picks the account\n  \
                cam share work          share your settings, CLAUDE.md, skills or history with it\n\
              \n\
-             work starts with an empty Claude Code setup of its own: its first session shows the first-run screens, \
-             and your settings, CLAUDE.md, skills and MCP servers in ~/.claude aren't there.\n",
+             work starts with an empty Claude Code setup of its own.\n\
+             Its first session shows the first-run screens, without your settings, CLAUDE.md, skills or MCP servers.\n",
         )
         .stderr(LOGGING_WORK);
     assert_eq!(read(&sb.config), "[accounts.work]\n");
