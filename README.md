@@ -127,7 +127,7 @@ To uninstall:
 
 - **macOS:** the main platform, arm64 and Intel. Claude Code keeps each account's login in the Keychain itself.
 - **Linux:** released, and the whole test suite passes there, but cam hasn't been tried in a real Claude Code session on Linux yet. The binaries need glibc 2.35 or newer (Ubuntu 22.04, Debian 12). Reports are welcome.
-- **Windows:** new, x64, from PowerShell. The test suite passes there, but cam hasn't been tried in a real Claude Code session on Windows yet, so reports are welcome. Plain `claude` goes through a copy of cam named `claude.exe` in `~\.local\share\cam\shims`, which `cam init powershell` keeps up to date. Sharing links folders through junctions, which need nothing special, and files through symlinks, which Windows makes only with Developer Mode on: without it, `skills` is the group that can be shared.
+- **Windows:** new, x64, from PowerShell. Tried in real Claude Code sessions on Windows Server 2025, with two accounts, sharing and plain `claude`, and the test suite runs on Windows in CI. Reports from Windows 11 are welcome. Plain `claude` goes through a copy of cam named `claude.exe` in `~\.local\share\cam\shims`, which `cam init powershell` keeps up to date. Sharing links folders through junctions, which need nothing special, and files through symlinks, which Windows makes only with Developer Mode on: without it, `skills` is the group that can be shared.
 - **Shells:** `cam init` writes for bash, zsh, fish and PowerShell, which is the one on Windows. In another shell, put `~/.local/share/cam/shims` first on `PATH` yourself, after running `cam init bash` once to make the link.
 
 ## Contributing
