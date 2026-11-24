@@ -730,12 +730,17 @@ mod tests {
         assert_eq!(status(Reaches::Nothing, Some(dir)), Status::Warn);
         assert_eq!(status(Reaches::Other(real.clone()), None), Status::Info);
         assert_eq!(status(Reaches::Nothing, None), Status::Info);
+        // The link is joined to the dir, so Windows spells it with `\`.
+        let link = dir.join("claude");
         assert_eq!(
             path(&Reaches::Other(real), Some(dir), zsh).message,
-            "path: plain `claude` runs /h/.local/bin/claude, not cam\n\
-             hint: add `eval \"$(cam init zsh)\"` to the end of ~/.zshrc, then open a new terminal; \
-             it must come after any line that adds /h/.local/bin. \
-             If you'd rather not use cam for plain `claude`, delete /h/.local/share/cam/shims/claude"
+            format!(
+                "path: plain `claude` runs /h/.local/bin/claude, not cam\n\
+                 hint: add `eval \"$(cam init zsh)\"` to the end of ~/.zshrc, then open a new terminal; \
+                 it must come after any line that adds /h/.local/bin. \
+                 If you'd rather not use cam for plain `claude`, delete {}",
+                link.display()
+            )
         );
     }
 

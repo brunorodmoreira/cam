@@ -14,6 +14,8 @@ use toml::value::Date;
 
 use crate::date;
 use crate::error::Error;
+use crate::platform::IgnoreInterrupts;
+pub use crate::platform::describe_exit;
 
 /// The `authMethod` of a `/login`.
 pub const CLAUDE_AI: &str = "claude.ai";
@@ -170,46 +172,6 @@ pub fn logout(mut command: Command, program: &Path) -> Result<(), Error> {
     })
 }
 
-/// "exit status 1", or the signal that ended it.
-pub fn describe_exit(status: ExitStatus) -> String {
-    use std::os::unix::process::ExitStatusExt;
-    match (status.code(), status.signal()) {
-        (Some(code), _) => format!("exit status {code}"),
-        (None, Some(libc::SIGINT)) => "interrupted".to_owned(),
-        (None, Some(signal)) => format!("ended by signal {signal}"),
-        (None, None) => "no exit status".to_owned(),
-    }
-}
-
-/// Ignores SIGINT and SIGQUIT until dropped, then restores what was there.
-struct IgnoreInterrupts {
-    previous: [(libc::c_int, libc::sighandler_t); 2],
-}
-
-impl IgnoreInterrupts {
-    fn new() -> Self {
-        let ignore = |signal| {
-            // SAFETY: `signal` with SIG_IGN installs no handler code, so
-            // nothing runs in signal context.
-            (signal, unsafe { libc::signal(signal, libc::SIG_IGN) })
-        };
-        Self {
-            previous: [ignore(libc::SIGINT), ignore(libc::SIGQUIT)],
-        }
-    }
-}
-
-impl Drop for IgnoreInterrupts {
-    fn drop(&mut self) {
-        for (signal, handler) in self.previous {
-            if handler != libc::SIG_ERR {
-                // SAFETY: restores the disposition `new` replaced.
-                unsafe { libc::signal(signal, handler) };
-            }
-        }
-    }
-}
-
 /// The `.claude.json` of a config dir: inside it for an account (or an
 /// exported `CLAUDE_CONFIG_DIR`), else `~/.claude.json`.
 pub fn claude_json(config_dir: Option<&Path>, home: &Path) -> PathBuf {
@@ -333,20 +295,6 @@ mod tests {
         assert_eq!(
             Expiry::Expired(day(10)).describe(TODAY).as_deref(),
             Some("expired 2026-11-10 (5 days ago)")
-        );
-    }
-
-    #[test]
-    fn describes_how_a_command_ended() {
-        use std::os::unix::process::ExitStatusExt;
-        assert_eq!(describe_exit(ExitStatus::from_raw(1 << 8)), "exit status 1");
-        assert_eq!(
-            describe_exit(ExitStatus::from_raw(libc::SIGINT)),
-            "interrupted"
-        );
-        assert_eq!(
-            describe_exit(ExitStatus::from_raw(libc::SIGKILL)),
-            "ended by signal 9"
         );
     }
 

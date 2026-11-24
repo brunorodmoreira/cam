@@ -14,6 +14,7 @@ mod error;
 mod init;
 mod launch;
 mod marker;
+mod platform;
 mod redact;
 mod resolve;
 mod settings;
@@ -21,9 +22,6 @@ mod share;
 mod shim;
 #[cfg(test)]
 mod testutil;
-
-#[cfg(not(unix))]
-compile_error!("cam supports Unix only (macOS first); see DESIGN.md");
 
 use std::env;
 use std::ffi::OsString;
@@ -282,7 +280,7 @@ fn escape_hint(err: anyhow::Error) -> anyhow::Error {
 }
 
 fn config_path() -> Result<PathBuf, Error> {
-    config::path(env::var_os(config::ENV_CONFIG), dirs::home_dir())
+    config::path(env::var_os(config::ENV_CONFIG), platform::home_dir())
 }
 
 fn dispatch(command: Command) -> anyhow::Result<()> {

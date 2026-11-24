@@ -1,10 +1,11 @@
 //! Account names, the reserved `system` name, and where account dirs live.
 
 use std::fmt;
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::io;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+
+use crate::platform;
 
 /// Reserved name: Claude Code's own setup, untouched.
 pub const SYSTEM: &str = "system";
@@ -12,8 +13,9 @@ pub const SYSTEM: &str = "system";
 /// The account name rule, as shown in error messages.
 pub const NAME_RULE: &str = "^[a-z0-9][a-z0-9_-]*$";
 
-/// Where account dirs live, under the home directory.
-const ACCOUNTS_DIR: &str = ".local/share/cam/accounts";
+/// Where account dirs live, under the home directory, one component at a
+/// time so that Windows spells it with its own separator.
+const ACCOUNTS_DIR: [&str; 4] = [".local", "share", "cam", "accounts"];
 
 /// Whether `name` matches [`NAME_RULE`]. `system` matches too; callers
 /// decide whether it is allowed in their position.
@@ -107,16 +109,18 @@ impl fmt::Display for Selection {
 /// Always spelled the same way, because Claude Code keys the login's
 /// Keychain slot to the exact path.
 pub fn dir(home: &Path, name: &str) -> PathBuf {
-    home.join(ACCOUNTS_DIR).join(name)
+    let mut dir = home.to_owned();
+    dir.extend(ACCOUNTS_DIR);
+    dir.join(name)
 }
 
-/// Creates an account dir with mode 0700, and its parents as needed.
-/// Fails if it already exists.
+/// Creates an account dir only its owner can use (mode 0700 on Unix), and
+/// its parents as needed. Fails if it already exists.
 pub fn create_dir(dir: &Path) -> io::Result<()> {
     if let Some(parent) = dir.parent() {
         fs::create_dir_all(parent)?;
     }
-    DirBuilder::new().mode(0o700).create(dir)
+    platform::private_dir().create(dir)
 }
 
 /// Whether anything (a dir, a file or a link) is at `path`.
@@ -126,8 +130,6 @@ pub fn exists(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
     use crate::testutil::Tree;
 
@@ -215,8 +217,12 @@ mod tests {
         let tree = Tree::new();
         let path = dir(&tree.root, "work");
         create_dir(&path).unwrap();
-        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
+        }
         assert!(exists(&path));
         assert_eq!(
             create_dir(&path).unwrap_err().kind(),
