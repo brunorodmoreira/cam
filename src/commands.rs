@@ -458,17 +458,24 @@ fn next_steps(name: &str, reached: bool, shell: Option<Shell>, shares: &[Group])
             "share your settings, CLAUDE.md, skills or history with it".to_owned(),
         ));
     }
+    // A long command, such as PowerShell's setup line, goes on a line of
+    // its own, rather than pushing every description far to the right.
+    const LONG: usize = 28;
     let width = steps
         .iter()
         .map(|(command, _)| command.len())
+        .filter(|&len| len <= LONG)
         .max()
         .unwrap_or(0);
     let mut lines = vec![String::new(), "Next:".to_owned()];
-    lines.extend(
-        steps
-            .iter()
-            .map(|(command, what)| format!("  {command:<width$}  {what}")),
-    );
+    for (command, what) in &steps {
+        if command.len() > width {
+            lines.push(format!("  {command}"));
+            lines.push(format!("  {:width$}  {what}", ""));
+        } else {
+            lines.push(format!("  {command:<width$}  {what}"));
+        }
+    }
     lines.push(String::new());
     lines.push(match shares {
         [] => format!(
@@ -1387,6 +1394,21 @@ mod tests {
                 "personal  me@home.org  -",
                 "work      -            settings, skills",
             ]
+        );
+    }
+
+    #[test]
+    fn a_long_next_step_gets_a_line_of_its_own() {
+        let steps = next_steps("work", false, Some(Shell::Powershell), &[]).join("\n");
+        assert_eq!(
+            steps,
+            "\nNext:\n  \
+             cam use work    use work in this folder and the ones below it (or pass --dir)\n  \
+             Invoke-Expression (& cam init powershell | Out-String)\n                  \
+             at the end of your PowerShell profile ($PROFILE), so plain `claude` picks the account\n  \
+             cam share work  share your settings, CLAUDE.md, skills or history with it\n\n\
+             work starts with an empty Claude Code setup of its own.\n\
+             Its first session shows the first-run screens, without your settings, CLAUDE.md, skills or MCP servers."
         );
     }
 

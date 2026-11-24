@@ -723,23 +723,36 @@ fn usage_errors_are_redacted() {
 fn add_logs_in_and_records_the_account() {
     let sb = Sandbox::with_config(None);
     sb.fake_claude("bin");
+    // The setup line is for $SHELL, and for PowerShell on Windows, where
+    // it's long enough to go on a line of its own.
+    let next = match cfg!(windows) {
+        false => {
+            "  cam use work            use work in this folder and the ones below it (or pass --dir)\n  \
+                    eval \"$(cam init zsh)\"  at the end of ~/.zshrc, so plain `claude` picks the account\n  \
+                    cam share work          share your settings, CLAUDE.md, skills or history with it\n"
+        }
+        true => concat!(
+            "  cam use work    use work in this folder and the ones below it (or pass --dir)\n",
+            "  Invoke-Expression (& cam init powershell | Out-String)\n",
+            "                  at the end of your PowerShell profile ($PROFILE), so plain `claude` picks the account\n",
+            "  cam share work  share your settings, CLAUDE.md, skills or history with it\n",
+        ),
+    };
     sb.cam(&sb.root)
         .args(["add", "work"])
         .env("SHELL", "/bin/zsh")
         .assert()
         .success()
-        .stdout(
+        .stdout(format!(
             "Login successful.\n\
              added work: logged in as work@example.com (Acme, team)\n\
              \n\
-             Next:\n  \
-               cam use work            use work in this folder and the ones below it (or pass --dir)\n  \
-               eval \"$(cam init zsh)\"  at the end of ~/.zshrc, so plain `claude` picks the account\n  \
-               cam share work          share your settings, CLAUDE.md, skills or history with it\n\
+             Next:\n\
+             {next}\
              \n\
              work starts with an empty Claude Code setup of its own.\n\
              Its first session shows the first-run screens, without your settings, CLAUDE.md, skills or MCP servers.\n",
-        )
+        ))
         .stderr(LOGGING_WORK);
     assert_eq!(read(&sb.config), "[accounts.work]\n");
     let dir = sb.account_dir("work");
