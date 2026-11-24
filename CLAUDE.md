@@ -14,5 +14,5 @@ Rust CLI that picks the Claude Code account per folder via `.claude-account` fil
 
 Open source, dual-licensed `MIT OR Apache-2.0`. Commits don't get a `Co-Authored-By` trailer.
 
-- `main` is protected: work on a branch and open a pull request. It merges by squash or rebase once CI's `macos-latest` and `ubuntu-latest` jobs pass. No force pushes.
+- `main` is protected: work on a branch and open a pull request. It merges by squash or rebase once CI's `macOS` and `Linux` checks pass. No force pushes.
 - A release is a `v<version>` tag pushed from `main` (see Milestones in `DESIGN.md`). Only admins can create release tags, and nobody can move or delete one.
