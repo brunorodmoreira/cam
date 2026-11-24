@@ -20,6 +20,14 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::core::BOOL;
 
+/// Windows' answer when it won't make a symlink: Developer Mode is off and
+/// the user isn't an administrator.
+const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+
+/// What cam says instead of [`ERROR_PRIVILEGE_NOT_HELD`].
+const FILE_LINKS_NEED_DEVELOPER_MODE: &str =
+    "Windows makes links to files only with Developer Mode on (Settings > System > For developers)";
+
 /// What `cmd.exe` uses when `PATHEXT` is unset.
 const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
@@ -116,24 +124,61 @@ pub fn is_named(path: &Path, command: &str) -> bool {
     stem_matches && (path.extension().is_none() || has_runnable_extension(path))
 }
 
+/// Whether cam was started as `command`: Windows knows the file it
+/// started, such as the shim's `claude.exe`, whatever the caller put in
+/// `argv[0]`.
+pub fn started_as(argv0: &OsStr, command: &str) -> bool {
+    env::current_exe().is_ok_and(|exe| is_named(&exe, command))
+        || is_named(Path::new(argv0), command)
+}
+
 /// Compares the volume and file index, which also catches hard links.
 pub(super) fn same_file_id(a: &Path, b: &Path) -> bool {
     same_file::is_same_file(a, b).unwrap_or(false)
 }
 
-/// A symlink at `link` to `target`. Windows makes them only with Developer
-/// Mode on, or for an administrator.
-pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
+/// A link at `link` to `target`. A folder gets a directory junction, which
+/// any user can make. A file gets a symlink, which Windows makes only with
+/// Developer Mode on, or for an administrator: without either, the error
+/// says so.
+pub fn link(target: &Path, link: &Path) -> io::Result<()> {
     if target.is_dir() {
-        std::os::windows::fs::symlink_dir(target, link)
+        junction::create(target, link)
     } else {
-        std::os::windows::fs::symlink_file(target, link)
+        std::os::windows::fs::symlink_file(target, link).map_err(|err| {
+            match err.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) {
+                true => io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    FILE_LINKS_NEED_DEVELOPER_MODE,
+                ),
+                false => err,
+            }
+        })
+    }
+}
+
+/// Whether Windows lets this user make links to files: it tries one, in
+/// the temp dir. Developer Mode and the right to make them are the same
+/// for every folder.
+pub fn file_links_allowed() -> bool {
+    let probe = env::temp_dir().join(format!(".cam-link-check-{}", process::id()));
+    let _ = fs::remove_file(&probe);
+    match std::os::windows::fs::symlink_file("nowhere", &probe) {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(err) => err.raw_os_error() != Some(ERROR_PRIVILEGE_NOT_HELD),
     }
 }
 
 /// A link at `to` with the same target as the link at `from`, and of the
-/// same kind, even when the target is gone.
+/// same kind, even when the target is gone: a junction, or a symlink to a
+/// folder or a file.
 pub fn copy_link(from: &Path, to: &Path) -> io::Result<()> {
+    if junction::exists(from).unwrap_or(false) {
+        return junction::create(junction::get_target(from)?, to);
+    }
     let target = fs::read_link(from)?;
     if fs::symlink_metadata(from)?.file_type().is_symlink_dir() {
         std::os::windows::fs::symlink_dir(target, to)
@@ -142,8 +187,8 @@ pub fn copy_link(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
-/// Removes the link at `path`, never what it points to. A link to a folder
-/// is removed as a folder.
+/// Removes the link at `path`, never what it points to. A link to a folder,
+/// a junction included, is removed as a folder.
 pub fn remove_link(path: &Path) -> io::Result<()> {
     if fs::symlink_metadata(path)?.file_type().is_symlink_dir() {
         fs::remove_dir(path)
@@ -279,6 +324,49 @@ mod tests {
             "{}",
             dir.display()
         );
+    }
+
+    #[test]
+    fn folders_link_through_junctions_that_go_without_their_target() {
+        let tree = crate::testutil::Tree::new();
+        let target = tree.dir("shared/skills");
+        fs::write(target.join("a.md"), "a\n").unwrap();
+        let link_path = tree.dir("account").join("skills");
+        link(&target, &link_path).unwrap();
+        assert!(junction::exists(&link_path).unwrap());
+        assert_eq!(fs::read_to_string(link_path.join("a.md")).unwrap(), "a\n");
+        assert!(crate::platform::same_file(&link_path, &target));
+
+        let copy = tree.root.join("account").join("copy");
+        copy_link(&link_path, &copy).unwrap();
+        assert!(junction::exists(&copy).unwrap());
+
+        remove_link(&link_path).unwrap();
+        remove_link(&copy).unwrap();
+        assert!(!link_path.exists() && !copy.exists());
+        assert_eq!(fs::read_to_string(target.join("a.md")).unwrap(), "a\n");
+    }
+
+    #[test]
+    fn files_link_through_symlinks_where_windows_allows_them() {
+        if !file_links_allowed() {
+            eprintln!("skipped: turn on Developer Mode to test links to files");
+            return;
+        }
+        let tree = crate::testutil::Tree::new();
+        let target = tree.dir("shared").join("settings.json");
+        fs::write(&target, "{}\n").unwrap();
+        let link_path = tree.dir("account").join("settings.json");
+        link(&target, &link_path).unwrap();
+        assert!(
+            fs::symlink_metadata(&link_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&link_path).unwrap(), "{}\n");
+        remove_link(&link_path).unwrap();
+        assert!(target.exists());
     }
 
     #[test]

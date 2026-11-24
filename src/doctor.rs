@@ -145,7 +145,7 @@ pub fn path(reaches: &Reaches, installed: Option<&Path>, shell: Option<Shell>) -
                  If you'd rather not use cam for plain `claude`, delete {}",
                 claude.display(),
                 claude.parent().unwrap_or(claude).display(),
-                dir.join(shim::NAME).display()
+                dir.join(shim::FILE).display()
             ),
         ),
         (Reaches::Nothing, Some(dir)) => Check::new(
@@ -153,7 +153,7 @@ pub fn path(reaches: &Reaches, installed: Option<&Path>, shell: Option<Shell>) -
             format!(
                 "path: plain `claude` finds nothing on PATH\n\
                  hint: {setup}. If you'd rather not use cam for plain `claude`, delete {}",
-                dir.join(shim::NAME).display()
+                dir.join(shim::FILE).display()
             ),
         ),
         (Reaches::Other(claude), None) => Check::new(

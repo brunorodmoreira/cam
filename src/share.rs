@@ -54,6 +54,12 @@ impl Group {
     }
 
     /// The entries of `~/.claude` the group links.
+    /// Whether the group links files, not only folders. Windows makes links
+    /// to files only with Developer Mode on.
+    pub fn has_files(self) -> bool {
+        self.entries().iter().any(|entry| entry.kind != Kind::Dir)
+    }
+
     pub fn entries(self) -> &'static [Entry] {
         match self {
             Self::Settings => SETTINGS,
@@ -380,7 +386,7 @@ pub fn top_up(home: &Path, account_dir: &Path, groups: &[Group]) -> TopUp {
 fn link(home: &Path, account_dir: &Path, entry: Entry) -> io::Result<()> {
     let target = shared_path(home, entry);
     ensure_shared(home, &target, entry)?;
-    match platform::symlink(&target, &account_dir.join(entry.name)) {
+    match platform::link(&target, &account_dir.join(entry.name)) {
         // Another launch got there first.
         Err(err)
             if err.kind() == io::ErrorKind::AlreadyExists
@@ -606,10 +612,12 @@ pub fn preview(home: &Path, group: Group) -> String {
     }
 }
 
-// Unix for now: Windows makes other kinds of links, with tests of their own
-// (see DESIGN.md, Windows).
-#[cfg(all(test, unix))]
+// The tests that make their own links use Unix symlinks to paths like
+// `/elsewhere`. The rest run on Windows too, where folders link through
+// junctions and files through symlinks, which need Developer Mode.
+#[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     use super::*;
@@ -754,6 +762,7 @@ mod tests {
         assert_eq!(state(&home, &account, keybindings), State::Linked);
     }
 
+    #[cfg(unix)]
     #[test]
     fn top_up_never_replaces_the_accounts_own_entries() {
         let (_tree, home, account) = setup();
@@ -780,6 +789,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_link_by_another_spelling_counts() {
         let (tree, home, account) = setup();
@@ -851,6 +861,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn unlink_with_copy_keeps_a_copy_and_links_inside_stay_links() {
         let (_tree, home, account) = setup();
@@ -908,6 +919,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn sizes() {
         let (tree, home, _account) = setup();

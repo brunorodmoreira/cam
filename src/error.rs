@@ -17,7 +17,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("cannot find the home directory; set HOME")]
+    #[error("cannot find the home directory; set {}", if cfg!(windows) { "USERPROFILE" } else { "HOME" })]
     NoHome,
 
     #[error("CAM_ACCOUNT is not valid UTF-8")]
@@ -160,9 +160,10 @@ pub enum Error {
     CurrentExe(#[source] io::Error),
 
     #[error(
-        "{} already exists and isn't cam's link, so cam leaves it alone\n\
+        "{} already exists and isn't {}, so cam leaves it alone\n\
          hint: plain `claude` can't go through cam until you move it away",
-        path.display()
+        path.display(),
+        if cfg!(windows) { "a copy of cam" } else { "cam's link" }
     )]
     ShimOccupied { path: PathBuf },
 
@@ -208,6 +209,13 @@ pub enum Error {
         groups: String,
         shares: String,
     },
+
+    #[error(
+        "Windows makes links to files only with Developer Mode on, so cam can't share {groups}\n\
+         hint: turn on Developer Mode in Settings > System > For developers, then run this again. \
+         `skills` has only folders, so it can be shared without it"
+    )]
+    FileLinksNotAllowed { groups: String },
 
     #[error("cannot link {} to {}", path.display(), target.display())]
     Link {

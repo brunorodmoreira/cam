@@ -43,9 +43,10 @@ To make plain `claude` pick the account, add one line at the end of your shell's
 eval "$(cam init zsh)"            # ~/.zshrc
 eval "$(cam init bash)"           # ~/.bashrc
 cam init fish | source            # ~/.config/fish/config.fish
+Invoke-Expression (& cam init powershell | Out-String)   # $PROFILE, on Windows
 ```
 
-It goes at the end, after the line that adds `~/.local/bin`, where Claude Code installs itself. At each shell start, `cam init` makes sure `~/.local/share/cam/shims/claude` is a link to cam, puts that folder first on `PATH` (once, even in nested shells), and loads completions with your account names. Open a new terminal, and every `claude` goes through cam. cam never edits your shell files itself, and it never replaces a `claude` there that isn't its own link.
+It goes at the end, after the line that adds `~/.local/bin`, where Claude Code installs itself. At each shell start, `cam init` makes sure `~/.local/share/cam/shims/claude` is a link to cam, puts that folder first on `PATH` (once, even in nested shells), and loads completions with your account names. Open a new terminal, and every `claude` goes through cam. cam never edits your shell files itself, and it never replaces a `claude` there that isn't its own link. On Windows, the shim is `claude.exe`, a copy of `cam.exe` that `cam init powershell` replaces whenever cam changes.
 
 cam finds the real `claude` on your `PATH` and replaces itself with it, so the terminal, signals and exit code are claude's own. For an account, that process gets `CLAUDE_CONFIG_DIR` set to the account's folder. For `system`, `claude` runs exactly as it would without cam.
 

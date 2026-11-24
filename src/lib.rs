@@ -33,11 +33,23 @@ use clap::{CommandFactory, Parser, Subcommand, ValueHint};
 use crate::error::Error;
 use crate::redact::redact;
 
+#[cfg(unix)]
 const GETTING_STARTED: &str = "\
 Getting started:
   cam add work                log a new account in, with Claude Code's own login
   cam use work --dir ~/Work   use it in ~/Work and every folder below
   eval \"$(cam init zsh)\"      at the end of ~/.zshrc, so plain `claude` picks the account
+
+Where no .claude-account applies, `claude` runs as it always has: that's
+`system`, Claude Code's own setup and login.";
+
+#[cfg(windows)]
+const GETTING_STARTED: &str = "\
+Getting started:
+  cam add work                log a new account in, with Claude Code's own login
+  cam use work --dir ~\\Work   use it in ~\\Work and every folder below
+  Invoke-Expression (& cam init powershell | Out-String)
+                              at the end of $PROFILE, so plain `claude` picks the account
 
 Where no .claude-account applies, `claude` runs as it always has: that's
 `system`, Claude Code's own setup and login.";

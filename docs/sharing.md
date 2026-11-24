@@ -25,4 +25,6 @@ MCP servers are never shared: Claude Code keeps them in `.claude.json`, next to 
 
 When an account already has its own copy of something it starts to share, such as its own `settings.json`, `cam share` asks, then renames it to `settings.json.before-share-<date>`. Nothing is deleted: copy what you want from it into `~/.claude`. `cam doctor` lists these copies until you delete them.
 
+On Windows, folders link through junctions, and files through symlinks, which Windows makes only with [Developer Mode](https://learn.microsoft.com/windows/apps/get-started/enable-your-device-for-development) on. Without it, `cam add` and `cam share` refuse a group that has a file in it (`settings`, `instructions` and `history` do) before changing anything, and `skills`, which is only folders, still works.
+
 Every launch adds missing links, and never replaces a real file. If something saved a shared file by replacing it, cam says so at launch, and `cam share work settings` links it again. Claude Code's own writes keep the links (checked with Claude Code 2.1.330), and so do saves from vim and Zed. `cam doctor` checks each link.

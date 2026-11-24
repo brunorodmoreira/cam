@@ -25,12 +25,18 @@ brew install brunorodmoreira/tap/cam
 ```
 
 <details>
-<summary>Other ways: install script, Cargo, or a download</summary>
+<summary>Other ways: install script, Windows, Cargo, or a download</summary>
 
 The install script puts `cam` in `~/.local/bin`, next to Claude Code:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/brunorodmoreira/cam/releases/latest/download/cam-cli-installer.sh | sh
+```
+
+On Windows, in PowerShell, the install script puts `cam.exe` in `~\.local\bin`, next to Claude Code:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/brunorodmoreira/cam/releases/latest/download/cam-cli-installer.ps1 | iex"
 ```
 
 With Rust, from [crates.io](https://crates.io/crates/cam-cli), where it's `cam-cli` because `cam` is taken:
@@ -59,6 +65,7 @@ Then add one line at the end of your shell's startup file, after the line that p
 | zsh | `~/.zshrc` | `eval "$(cam init zsh)"` |
 | bash | `~/.bashrc` | `eval "$(cam init bash)"` |
 | fish | `~/.config/fish/config.fish` | `cam init fish \| source` |
+| PowerShell (Windows) | `$PROFILE` | `Invoke-Expression (& cam init powershell \| Out-String)` |
 
 Open a new terminal, and `claude` under `~/Work` runs as `work`, anywhere else as `system`.
 
@@ -112,7 +119,7 @@ To uninstall:
 1. Delete the `cam init` line from your shell's startup file.
 2. Run `cam remove <name>` for each account you don't want to keep. It logs the account out, so its login doesn't stay behind.
 3. Delete `~/.local/share/cam` (the link for plain `claude`, and the accounts' folders) and `~/.config/cam`.
-4. Uninstall the binary: `brew uninstall cam`, `cargo uninstall cam-cli`, or delete `~/.local/bin/cam`.
+4. Uninstall the binary: `brew uninstall cam`, `cargo uninstall cam-cli`, or delete `~/.local/bin/cam` (`cam.exe` on Windows).
 
 `.claude-account` files left in folders do nothing without cam.
 
@@ -120,8 +127,8 @@ To uninstall:
 
 - **macOS:** the main platform, arm64 and Intel. Claude Code keeps each account's login in the Keychain itself.
 - **Linux:** released, and the whole test suite passes there, but cam hasn't been tried in a real Claude Code session on Linux yet. The binaries need glibc 2.35 or newer (Ubuntu 22.04, Debian 12). Reports are welcome.
-- **Windows:** not supported. The launcher relies on Unix `exec` and a symlink.
-- **Shells:** `cam init` writes for bash, zsh and fish. In another shell, put `~/.local/share/cam/shims` first on `PATH` yourself, after running `cam init bash` once to make the link.
+- **Windows:** new, x64, from PowerShell. The test suite passes there, but cam hasn't been tried in a real Claude Code session on Windows yet, so reports are welcome. Plain `claude` goes through a copy of cam named `claude.exe` in `~\.local\share\cam\shims`, which `cam init powershell` keeps up to date. Sharing links folders through junctions, which need nothing special, and files through symlinks, which Windows makes only with Developer Mode on: without it, `skills` is the group that can be shared.
+- **Shells:** `cam init` writes for bash, zsh, fish and PowerShell, which is the one on Windows. In another shell, put `~/.local/share/cam/shims` first on `PATH` yourself, after running `cam init bash` once to make the link.
 
 ## Contributing
 
