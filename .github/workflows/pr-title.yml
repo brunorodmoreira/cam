@@ -1,0 +1,22 @@
+name: PR title
+
+# A squash merge uses the pull request's title as its commit message, and
+# release-plz reads those to pick the next version and write the changelog.
+# So each title is a conventional commit: `fix: …`, `feat: …`, or `feat!: …`
+# for a breaking change (see CONTRIBUTING.md).
+on:
+  pull_request:
+    # synchronize: the check is required, so it reports on every new commit.
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  check:
+    name: PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

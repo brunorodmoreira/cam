@@ -1,0 +1,26 @@
+# release-plz picks the next version and writes its CHANGELOG section from the
+# titles of the pull requests merged since the last release (see
+# .github/workflows/release-plz.yml and CONTRIBUTING.md).
+
+[workspace]
+# cargo-dist creates the GitHub release, with the archives, once the tag lands.
+git_release_enable = false
+# Publish only when the release pull request merges, not on every push to main.
+release_always = false
+# cam's library is internal to the binary, so its API isn't checked for
+# breaking changes. A breaking change to the CLI is marked in the PR title.
+semver_check = false
+
+[changelog]
+# Keep commits marked breaking even if their type is skipped below.
+protect_breaking_commits = true
+commit_parsers = [
+  { message = "^feat", group = "added" },
+  { message = "^fix", group = "fixed" },
+  { message = "^perf", group = "changed" },
+  { message = "^docs", group = "documentation" },
+  { message = "^(chore|build)\\(deps\\)", group = "dependencies" },
+  # Changes a user doesn't see.
+  { message = "^(ci|test|style|refactor|build|chore)", skip = true },
+  { message = ".*", group = "other" },
+]

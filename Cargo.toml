@@ -10,7 +10,7 @@ homepage = "https://github.com/brunorodmoreira/cam"
 readme = "README.md"
 keywords = ["claude", "claude-code", "accounts", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = [".github/", "CLAUDE.md", "docs/demo.gif", "docs/demo/"]
+exclude = [".github/", "CLAUDE.md", "dist-workspace.toml", "docs/demo.gif", "docs/demo/", "release-plz.toml"]
 
 [[bin]]
 name = "cam"

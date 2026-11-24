@@ -22,13 +22,9 @@ install-updater = false
 tap = "brunorodmoreira/homebrew-tap"
 # The formula's name: `brew install brunorodmoreira/tap/cam`
 formula = "cam"
-# Publish jobs to run in CI
-publish-jobs = ["homebrew", "./publish-crates"]
-
-# The crates.io job checks out the repo, and asks GitHub for the OIDC token
-# that crates.io's trusted publishing exchanges for a short-lived token.
-[dist.github-custom-job-permissions]
-publish-crates = { contents = "read", id-token = "write" }
+# Publish jobs to run in CI. crates.io isn't one: release-plz publishes the
+# crate before it pushes the tag that starts this release.
+publish-jobs = ["homebrew"]
 
 # Build for Apple Silicon on an Intel runner: GitHub's arm64 macOS runners are
 # short of capacity, and a build that waits 15 minutes for one is cancelled.

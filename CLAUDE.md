@@ -14,5 +14,6 @@ Rust CLI that picks the Claude Code account per folder via `.claude-account` fil
 
 Open source, dual-licensed `MIT OR Apache-2.0`. Commits don't get a `Co-Authored-By` trailer.
 
-- `main` is protected: work on a branch and open a pull request. It merges by squash or rebase once CI's `macOS` and `Linux` checks pass. No force pushes.
-- A release is a `v<version>` tag pushed from `main` (see Milestones in `DESIGN.md`). Only admins can create release tags, and nobody can move or delete one.
+- `main` is protected: work on a branch and open a pull request. It merges by squash once CI's `macOS`, `Linux` and `PR title` checks pass. No force pushes.
+- **PR titles are conventional commits** (`fix: …`, `feat: …`, `feat!: …` for a breaking change, `docs:`, `refactor:`, `ci:`, `chore:` …), written for the changelog: the squash commit takes the title, and release-plz picks the next version and writes CHANGELOG.md from it. Commits on a branch stay plain sentences. See CONTRIBUTING.md.
+- Releases go through release-plz's release pull request, never a hand-pushed tag, and a different version is picked by editing that pull request. Merging it publishes to crates.io and pushes the `v<version>` tag that starts cargo-dist's release (see Milestones in `DESIGN.md`). Nobody can move or delete a release tag.
