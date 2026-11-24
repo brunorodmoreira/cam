@@ -305,6 +305,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - `CLAUDE_CODE_PROCESS_WRAPPER` is ignored on Windows ("the launcher must exec into Claude Code, which Windows can't do"). Claude Code's own relaunch there ignores Ctrl-C, waits for its child and exits with its code.
 
 **What cam does.** Everything that differs is in `src/platform/` (`unix.rs`, `windows.rs`). The rest is the same code on both.
+- **The home dir** is Claude Code's: `USERPROFILE` if set and not empty, else the profile folder Windows knows, as Node's `os.homedir()` does. `HOME`, which Git Bash sets, is ignored, as Claude Code ignores it for its config dir. The tests set `USERPROFILE` to the sandbox's home.
 - **Paths:** as on Unix, under the home dir: `~\.config\cam\config.toml`, `~\.local\share\cam\accounts\<name>` and `~\.local\share\cam\shims`, each built one component at a time so they're spelled with `\`. Claude Code itself uses `~\.claude` and `~\.local\bin` there.
 - **Permissions:** no mode bits. What cam creates in the user profile inherits its ACL, which already keeps other users out.
 - **Finding `claude`:** each `PATH` dir is tried with the extensions in `PATHEXT`, in its order, as `cmd.exe` does, so `claude.exe` comes before `claude.cmd`. A file without one of those extensions can't be started, such as the shell script npm puts beside `claude.cmd` for Git Bash. File identity, for cam itself and the shim dir, is the volume and file index, which also catches hard links, and names compare without case.

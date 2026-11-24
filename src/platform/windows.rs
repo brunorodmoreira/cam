@@ -7,7 +7,7 @@ use std::io;
 use std::mem;
 use std::os::windows::fs::FileTypeExt;
 use std::os::windows::io::AsRawHandle;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, ExitStatus};
 use std::ptr;
 
@@ -25,6 +25,17 @@ const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
 /// How a process ends when Ctrl-C reaches it unhandled.
 const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+
+/// The home dir as Claude Code finds it, through Node's `os.homedir()`:
+/// `USERPROFILE` if set and not empty, else the profile folder Windows
+/// knows. `HOME`, which Git Bash sets, is ignored, as Claude Code ignores
+/// it for its config dir.
+pub fn home_dir() -> Option<PathBuf> {
+    env::var_os("USERPROFILE")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+}
 
 /// A builder for folders only their owner can use. The user profile's ACL
 /// already keeps other users out, and what cam creates in it inherits it.

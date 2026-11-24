@@ -2,6 +2,7 @@
 //! on both. See DESIGN.md, Windows.
 //!
 //! Each side has the same items:
+//! - [`home_dir`]: the home dir, as Claude Code finds it.
 //! - [`private_dir`] and [`private_file`]: what cam creates for one user.
 //! - [`executable_names`], [`is_executable`] and [`is_named`]: how a
 //!   command name maps to files.

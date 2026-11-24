@@ -163,7 +163,7 @@ fn account_name(name: &str) -> Result<String, Error> {
 }
 
 fn home() -> Result<PathBuf, Error> {
-    dirs::home_dir().ok_or(Error::NoHome)
+    platform::home_dir().ok_or(Error::NoHome)
 }
 
 /// A variable that is set and non-empty.
@@ -1040,7 +1040,7 @@ pub fn whoami(config_path: &Path) -> Result<()> {
 /// reads a credential. Fails if any check fails; warnings alone don't.
 pub fn doctor(config_path: &Path) -> Result<()> {
     let cwd = current_dir()?;
-    let home = dirs::home_dir();
+    let home = platform::home_dir();
     let own_exe = own_exe()?;
     let found = real_claude(&own_exe);
     let program = found.as_ref().ok().cloned();
@@ -1177,7 +1177,7 @@ pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
 
 /// The real `claude`, found the way `exec` finds it.
 fn real_claude(own_exe: &Path) -> Result<PathBuf, Error> {
-    let shim_dir = shim::default_dir(dirs::home_dir());
+    let shim_dir = shim::default_dir(platform::home_dir());
     let (claude_bin, path) = (env::var_os(ENV_CLAUDE_BIN), env::var_os("PATH"));
     discover::real_claude(&Search {
         claude_bin: claude_bin.as_deref(),
@@ -1207,7 +1207,7 @@ pub fn init(shell: Shell, completions: &str) -> Result<()> {
     };
     let path = env::var_os("PATH");
     let mut code = String::new();
-    match (shim::default_dir(dirs::home_dir()), own_exe()) {
+    match (shim::default_dir(platform::home_dir()), own_exe()) {
         (None, _) => warn(&"cannot find the home directory, so plain `claude` skips cam; set HOME"),
         (_, Err(err)) => warn(&err),
         (Some(dir), Ok(own_exe)) => {
@@ -1290,7 +1290,7 @@ fn current_dir() -> Result<PathBuf> {
 /// alone in `--dir=~/Work`.
 fn target_dir(dir: Option<&Path>) -> Result<PathBuf> {
     let dir = match dir {
-        Some(dir) => expand_home(dir, dirs::home_dir().as_deref()),
+        Some(dir) => expand_home(dir, platform::home_dir().as_deref()),
         None => current_dir()?,
     };
     let canonical =

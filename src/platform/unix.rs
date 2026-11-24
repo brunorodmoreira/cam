@@ -6,7 +6,13 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
+
+/// The home dir: `HOME`, else the user database.
+pub fn home_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+}
 
 /// A builder for folders only their owner can use: mode 0700.
 pub fn private_dir() -> DirBuilder {

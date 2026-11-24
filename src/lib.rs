@@ -280,7 +280,7 @@ fn escape_hint(err: anyhow::Error) -> anyhow::Error {
 }
 
 fn config_path() -> Result<PathBuf, Error> {
-    config::path(env::var_os(config::ENV_CONFIG), dirs::home_dir())
+    config::path(env::var_os(config::ENV_CONFIG), platform::home_dir())
 }
 
 fn dispatch(command: Command) -> anyhow::Result<()> {
