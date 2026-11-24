@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.3](https://github.com/brunorodmoreira/cam/compare/v0.1.2...v0.1.3) - 2026-11-24
+
+### Added
+
+- Support Windows ([#16](https://github.com/brunorodmoreira/cam/pull/16))
+
 ## [0.1.2](https://github.com/brunorodmoreira/cam/compare/v0.1.1...v0.1.2) - 2026-11-24
 
 ### Dependencies
