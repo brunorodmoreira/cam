@@ -102,6 +102,19 @@ pub fn path_code(shell: Shell, dir: &str, path: Option<&OsStr>) -> String {
     }
 }
 
+/// Everything `cam init` prints: `path_code` (empty if the link couldn't be
+/// made) and the completions. PowerShell's completions start with `using
+/// namespace`, which a script allows only before any other statement, so
+/// there they come first: after the `PATH` line, the whole
+/// `Invoke-Expression` failed to parse, and `PATH` stayed as it was.
+pub fn script(shell: Shell, path_code: &str, completions: &str) -> String {
+    let completions = completions_code(shell, completions);
+    match shell {
+        Shell::Powershell => format!("{completions}{path_code}"),
+        _ => format!("{path_code}{completions}"),
+    }
+}
+
 /// `completions` (clap's script), made safe to run at every shell start.
 /// zsh's needs `compdef`, which exists only once `compinit` has run, so
 /// it's skipped without it rather than failing.
@@ -218,6 +231,21 @@ mod tests {
         assert_eq!(
             path_code(Shell::Powershell, shims, None),
             format!("$env:PATH = '{shims}'\n")
+        );
+    }
+
+    #[test]
+    fn powershell_puts_its_using_lines_first() {
+        let completions =
+            "\nusing namespace System.Management.Automation\nRegister-ArgumentCompleter\n";
+        let path = "$env:PATH = 'x'\n";
+        assert_eq!(
+            script(Shell::Powershell, path, completions),
+            format!("{completions}{path}")
+        );
+        assert_eq!(
+            script(Shell::Bash, "export PATH='x'\n", "complete\n"),
+            "export PATH='x'\ncomplete\n"
         );
     }
 

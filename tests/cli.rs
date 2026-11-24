@@ -1935,15 +1935,18 @@ fn init_for_powershell_copies_cam_and_puts_its_dir_first() {
         .success()
         .stderr("");
     let code = stdout_of(&assert);
+    // The completions' `using` lines first, since PowerShell allows them
+    // only before any other statement, then the `PATH` line.
+    assert!(code.trim_start().starts_with("using namespace"), "{code}");
+    assert!(code.contains("Register-ArgumentCompleter"), "{code}");
     assert!(
-        code.starts_with(&format!(
+        code.ends_with(&format!(
             "$env:PATH = '{};{}'\n",
             sb.shims().display(),
             sb.bin().display()
         )),
         "{code}"
     );
-    assert!(code.contains("Register-ArgumentCompleter"), "{code}");
     // A copy, so `cam.exe` itself is never locked by a running session.
     let shim = sb.shims().join("claude.exe");
     assert_eq!(fs::read(&shim).unwrap(), fs::read(CAM).unwrap());
@@ -1955,6 +1958,54 @@ fn init_for_powershell_copies_cam_and_puts_its_dir_first() {
         .success()
         .stderr("");
     assert_eq!(fs::metadata(&shim).unwrap().modified().unwrap(), written);
+}
+
+#[test]
+fn init_for_powershell_puts_the_using_lines_first() {
+    let sb = Sandbox::new();
+    let assert = sb
+        .cam(&sb.root)
+        .args(["init", "powershell"])
+        .assert()
+        .success();
+    let code = stdout_of(&assert);
+    assert!(code.trim_start().starts_with("using namespace"), "{code}");
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    assert!(
+        code.ends_with(&format!(
+            "$env:PATH = '{}{separator}{}'\n",
+            sb.shims().display(),
+            sb.bin().display()
+        )),
+        "{code}"
+    );
+}
+
+/// The profile line, run in Windows PowerShell with this build of cam:
+/// afterwards, `PATH` starts with the shim dir.
+#[cfg(windows)]
+#[test]
+fn init_for_powershell_works_in_powershell() {
+    let sb = Sandbox::new();
+    let system_root = std::env::var_os("SystemRoot").unwrap();
+    let powershell = under(
+        Path::new(&system_root),
+        "System32/WindowsPowerShell/v1.0/powershell.exe",
+    );
+    let line = format!("Invoke-Expression (& '{CAM}' init powershell | Out-String); $env:PATH");
+    // PowerShell needs PATHEXT to see `cam.exe` as a program it can run.
+    sb.command(&powershell, &sb.root)
+        .env("SystemRoot", &system_root)
+        .env("PATHEXT", std::env::var_os("PATHEXT").unwrap())
+        .args(["-NoProfile", "-NonInteractive", "-Command", &line])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("using").not())
+        .stdout(predicate::str::starts_with(format!(
+            "{};{}",
+            sb.shims().display(),
+            sb.bin().display()
+        )));
 }
 
 #[cfg(windows)]
