@@ -10,6 +10,10 @@ release_always = false
 # cam's library is internal to the binary, so its API isn't checked for
 # breaking changes. A breaking change to the CLI is marked in the PR title.
 semver_check = false
+# A release pull request only once a fix, feature, speedup, breaking change or
+# dependency update has merged. CI and docs changes alone would release a
+# version with no changelog entry: the docs ship in the crate.
+release_commits = '^((feat|fix|perf)(\(.+\))?!?|[a-z]+(\(.+\))?!|chore\(deps\)):'
 
 [changelog]
 # Keep commits marked breaking even if their type is skipped below.
