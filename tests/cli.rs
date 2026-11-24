@@ -54,7 +54,7 @@ impl Sandbox {
     }
 
     fn dir(&self, rel: &str) -> PathBuf {
-        let path = self.root.join(rel);
+        let path = under(&self.root, rel);
         fs::create_dir_all(&path).unwrap();
         path
     }
@@ -111,7 +111,7 @@ impl Sandbox {
     /// The default shim dir under the sandbox's `HOME`.
     #[cfg(unix)]
     fn shims(&self) -> PathBuf {
-        cam_path(&self.home(), &[".local", "share", "cam", "shims"])
+        under(&self.home(), ".local/share/cam/shims")
     }
 
     /// `PATH` made of these sandbox dirs, in order.
@@ -121,7 +121,7 @@ impl Sandbox {
 
     /// Where cam keeps account `name`.
     fn account_dir(&self, name: &str) -> PathBuf {
-        cam_path(&self.home(), &[".local", "share", "cam", "accounts", name])
+        under(&self.home(), &format!(".local/share/cam/accounts/{name}"))
     }
 
     /// Creates account `name`'s dir, logged in as `email` the way
@@ -144,11 +144,11 @@ impl Sandbox {
     }
 }
 
-/// `base` joined with `parts` one at a time, as cam builds its paths, so
-/// they print the same on Windows.
-fn cam_path(base: &Path, parts: &[&str]) -> PathBuf {
+/// `rel`, written with `/`, joined to `base` one part at a time, as cam
+/// builds its paths, so they print the same on Windows.
+fn under(base: &Path, rel: &str) -> PathBuf {
     let mut path = base.to_owned();
-    path.extend(parts);
+    path.extend(rel.split('/'));
     path
 }
 
@@ -469,7 +469,7 @@ fn use_with_dir() {
             target.join(".claude-account").display()
         ));
     assert_eq!(read(&target.join(".claude-account")), "work\n");
-    assert!(!sb.root.join("elsewhere/.claude-account").exists());
+    assert!(!under(&sb.root, "elsewhere/.claude-account").exists());
 }
 
 #[test]
@@ -1834,7 +1834,7 @@ fn init_in_zsh_sends_plain_claude_through_cam() {
 fn init_replaces_an_old_link_quietly() {
     let sb = Sandbox::new();
     fs::create_dir_all(sb.shims()).unwrap();
-    let old = sb.root.join("old-build/cam");
+    let old = under(&sb.root, "old-build/cam");
     symlink(&old, sb.shims().join("claude")).unwrap();
     sb.cam(&sb.root)
         .args(["init", "zsh"])
@@ -2433,7 +2433,7 @@ fn bash_completes_account_names() {
 impl Sandbox {
     /// `<home>/.claude/<name>`, Claude Code's own setup.
     fn claude_dir(&self, name: &str) -> PathBuf {
-        self.home().join(".claude").join(name)
+        under(&self.home().join(".claude"), name)
     }
 
     /// Writes `<home>/.claude/<rel>`, with its folders.
@@ -2504,7 +2504,7 @@ fn add_shares_the_chosen_groups() {
     assert_eq!(read(&sb.claude_dir("settings.json")), "{}\n");
     assert!(sb.claude_dir("plugins").is_dir());
     assert_eq!(read(&keep), "mine\n");
-    assert_eq!(read(&dir.join("skills/keep.md")), "mine\n");
+    assert_eq!(read(&under(&dir, "skills/keep.md")), "mine\n");
     // No keybindings.json yet, and the other groups stay out.
     assert!(fs::symlink_metadata(dir.join("keybindings.json")).is_err());
     assert!(fs::symlink_metadata(dir.join("CLAUDE.md")).is_err());
@@ -2845,7 +2845,7 @@ fn unshare_with_copy_keeps_a_copy_of_each() {
     assert_not_linked(&dir, &["CLAUDE.md", "projects"]);
     assert_eq!(read(&dir.join("CLAUDE.md")), "be brief\n");
     assert_eq!(
-        read(&dir.join("projects/repo/session.jsonl")),
+        read(&under(&dir, "projects/repo/session.jsonl")),
         "0123456789\n"
     );
     assert_eq!(read(&sb.claude_dir("CLAUDE.md")), "be brief\n");

@@ -37,6 +37,27 @@ pub fn home_dir() -> Option<PathBuf> {
         .or_else(dirs::home_dir)
 }
 
+/// The absolute path with links resolved, without the `\\?\` prefix
+/// `fs::canonicalize` adds, as Windows tools print paths. A path that needs
+/// it keeps it: one at least `MAX_PATH` long, or not on a drive letter.
+pub fn canonicalize(path: &Path) -> io::Result<PathBuf> {
+    fs::canonicalize(path).map(simplified)
+}
+
+fn simplified(path: PathBuf) -> PathBuf {
+    let plain = path.to_str().and_then(|text| text.strip_prefix(r"\\?\"));
+    match plain {
+        Some(rest)
+            if rest.len() < 260
+                && rest.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && rest[1..].starts_with(":\\") =>
+        {
+            PathBuf::from(rest)
+        }
+        _ => path,
+    }
+}
+
 /// A builder for folders only their owner can use. The user profile's ACL
 /// already keeps other users out, and what cam creates in it inherits it.
 pub fn private_dir() -> DirBuilder {
@@ -239,6 +260,24 @@ mod tests {
         assert_eq!(
             describe_exit(ExitStatus::from_raw(STATUS_CONTROL_C_EXIT)),
             "interrupted"
+        );
+    }
+
+    #[test]
+    fn canonical_paths_drop_the_prefix_when_they_can() {
+        let plain = |text: &str| simplified(PathBuf::from(text));
+        assert_eq!(plain(r"\\?\C:\Users\me"), PathBuf::from(r"C:\Users\me"));
+        assert_eq!(
+            plain(r"\\?\UNC\server\share"),
+            PathBuf::from(r"\\?\UNC\server\share")
+        );
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        assert_eq!(plain(&long), PathBuf::from(&long));
+        let dir = canonicalize(&env::temp_dir()).unwrap();
+        assert!(
+            !dir.to_str().unwrap().starts_with(r"\\?\"),
+            "{}",
+            dir.display()
         );
     }
 

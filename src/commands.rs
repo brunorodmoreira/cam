@@ -1193,7 +1193,7 @@ fn own_exe() -> Result<PathBuf, Error> {
     if exe.is_absolute() {
         Ok(exe)
     } else {
-        fs::canonicalize(exe).map_err(Error::CurrentExe)
+        platform::canonicalize(&exe).map_err(Error::CurrentExe)
     }
 }
 
@@ -1294,7 +1294,7 @@ fn target_dir(dir: Option<&Path>) -> Result<PathBuf> {
         None => current_dir()?,
     };
     let canonical =
-        fs::canonicalize(&dir).with_context(|| format!("cannot open {}", dir.display()))?;
+        platform::canonicalize(&dir).with_context(|| format!("cannot open {}", dir.display()))?;
     ensure!(canonical.is_dir(), "{} is not a directory", dir.display());
     Ok(canonical)
 }
