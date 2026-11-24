@@ -33,6 +33,8 @@ The squash commit takes the pull request's title, and that title picks the next 
 | `docs: …` | Documentation | 0.1.1 | 1.0.1 |
 | `refactor:`, `test:`, `ci:`, `chore:`, … | left out | 0.1.1 | 1.0.1 |
 
+Only `fix`, `feat` and `perf` titles, breaking ones and Dependabot's updates start a release. The rest wait for the next one.
+
 A breaking change is one that can break someone's setup or scripts: a renamed command or flag, a different config format, or output that scripts read. Write the rest of the title for someone reading the changelog. Commits on your branch can say anything.
 
 Claude reviews a pull request once, when it's opened or marked ready, and comments. The review is advisory, and pull requests from forks don't get one.
