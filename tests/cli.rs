@@ -1993,8 +1993,10 @@ fn init_for_powershell_works_in_powershell() {
         "System32/WindowsPowerShell/v1.0/powershell.exe",
     );
     let line = format!("Invoke-Expression (& '{CAM}' init powershell | Out-String); $env:PATH");
+    // PowerShell needs PATHEXT to see `cam.exe` as a program it can run.
     sb.command(&powershell, &sb.root)
         .env("SystemRoot", &system_root)
+        .env("PATHEXT", std::env::var_os("PATHEXT").unwrap())
         .args(["-NoProfile", "-NonInteractive", "-Command", &line])
         .assert()
         .success()
