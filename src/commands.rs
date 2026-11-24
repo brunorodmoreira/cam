@@ -125,6 +125,22 @@ fn link_groups(home: &Path, dir: &Path, groups: &[Group]) -> Result<share::TopUp
     Ok(result)
 }
 
+/// Fails, before anything changes, when `groups` need links to files that
+/// Windows won't make: without Developer Mode, `share` would otherwise move
+/// the account's own `settings.json` aside and then fail to link it.
+fn check_file_links(groups: &[Group]) -> Result<(), Error> {
+    let with_files: Vec<String> = groups
+        .iter()
+        .filter(|group| group.has_files())
+        .map(ToString::to_string)
+        .collect();
+    if with_files.is_empty() || platform::file_links_allowed() {
+        return Ok(());
+    }
+    let groups = share::and_list(&with_files.iter().map(String::as_str).collect::<Vec<_>>());
+    Err(Error::FileLinksNotAllowed { groups })
+}
+
 /// Before a launch or a login: links whatever `groups` are missing, and
 /// warns about what the account can't share, since the account's own files
 /// are never replaced. Problems are warnings, so the launch goes on.
@@ -372,6 +388,7 @@ pub fn add(
             .ok_or_else(|| anyhow!("cancelled, so {name} was not added"))?,
         None => Vec::new(),
     };
+    check_file_links(&groups)?;
     account::create_dir(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     if let Err(err) = link_groups(&home, &dir, &groups) {
         let _ = fs::remove_dir_all(&dir);
@@ -441,17 +458,24 @@ fn next_steps(name: &str, reached: bool, shell: Option<Shell>, shares: &[Group])
             "share your settings, CLAUDE.md, skills or history with it".to_owned(),
         ));
     }
+    // A long command, such as PowerShell's setup line, goes on a line of
+    // its own, rather than pushing every description far to the right.
+    const LONG: usize = 28;
     let width = steps
         .iter()
         .map(|(command, _)| command.len())
+        .filter(|&len| len <= LONG)
         .max()
         .unwrap_or(0);
     let mut lines = vec![String::new(), "Next:".to_owned()];
-    lines.extend(
-        steps
-            .iter()
-            .map(|(command, what)| format!("  {command:<width$}  {what}")),
-    );
+    for (command, what) in &steps {
+        if command.len() > width {
+            lines.push(format!("  {command}"));
+            lines.push(format!("  {:width$}  {what}", ""));
+        } else {
+            lines.push(format!("  {command:<width$}  {what}"));
+        }
+    }
     lines.push(String::new());
     lines.push(match shares {
         [] => format!(
@@ -577,6 +601,7 @@ pub fn share(name: &str, group_args: &[String], yes: bool, config_path: &Path) -
         }
         None => return Err(Error::ShareNeedsGroups { name }.into()),
     };
+    check_file_links(&to_link)?;
     let dropped: Vec<Group> = current
         .iter()
         .copied()
@@ -1050,7 +1075,7 @@ pub fn doctor(config_path: &Path) -> Result<()> {
     let shim_dir = shim::default_dir(home.clone());
     let installed = shim_dir
         .as_deref()
-        .filter(|dir| shim::is_shim(&dir.join(shim::NAME), &own_exe));
+        .filter(|dir| shim::is_shim(&dir.join(shim::FILE), &own_exe));
     checks.push(doctor::path(
         &shim::first_on_path(path.as_deref(), &own_exe),
         installed,
@@ -1208,7 +1233,13 @@ pub fn init(shell: Shell, completions: &str) -> Result<()> {
     let path = env::var_os("PATH");
     let mut code = String::new();
     match (shim::default_dir(platform::home_dir()), own_exe()) {
-        (None, _) => warn(&"cannot find the home directory, so plain `claude` skips cam; set HOME"),
+        _ if cfg!(windows) && shell != Shell::Powershell => warn(
+            &"on Windows, plain `claude` goes through cam from PowerShell: put `Invoke-Expression (& cam init powershell | Out-String)` in your PowerShell profile",
+        ),
+        (None, _) => warn(&format_args!(
+            "cannot find the home directory, so plain `claude` skips cam; set {}",
+            if cfg!(windows) { "USERPROFILE" } else { "HOME" }
+        )),
         (_, Err(err)) => warn(&err),
         (Some(dir), Ok(own_exe)) => {
             let target = shim::target(&own_exe, path.as_deref());
@@ -1363,6 +1394,21 @@ mod tests {
                 "personal  me@home.org  -",
                 "work      -            settings, skills",
             ]
+        );
+    }
+
+    #[test]
+    fn a_long_next_step_gets_a_line_of_its_own() {
+        let steps = next_steps("work", false, Some(Shell::Powershell), &[]).join("\n");
+        assert_eq!(
+            steps,
+            "\nNext:\n  \
+             cam use work    use work in this folder and the ones below it (or pass --dir)\n  \
+             Invoke-Expression (& cam init powershell | Out-String)\n                  \
+             at the end of your PowerShell profile ($PROFILE), so plain `claude` picks the account\n  \
+             cam share work  share your settings, CLAUDE.md, skills or history with it\n\n\
+             work starts with an empty Claude Code setup of its own.\n\
+             Its first session shows the first-run screens, without your settings, CLAUDE.md, skills or MCP servers."
         );
     }
 

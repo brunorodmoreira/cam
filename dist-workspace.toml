@@ -8,11 +8,13 @@ cargo-dist-version = "0.34.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "homebrew"]
+installers = ["shell", "powershell", "homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax)
-# Unix only: cam doesn't build for Windows.
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
-# Where the shell installer puts cam: Claude Code's installer already has it on PATH
+# Windows on x64 only: Windows on Arm runs it through its x64 emulation, and
+# an Arm build would be cross-compiled and never run before shipping.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+# Where the installers put cam (`~\.local\bin` on Windows): Claude Code's
+# installer already has it on PATH
 install-path = "~/.local/bin/"
 # Where to host releases
 hosting = "github"

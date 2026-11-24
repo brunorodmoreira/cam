@@ -1,6 +1,6 @@
 //! Unix: macOS and Linux.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -48,6 +48,12 @@ pub fn is_named(path: &Path, command: &str) -> bool {
     path.file_name() == Some(command.as_ref())
 }
 
+/// Whether cam was started as `command`, going by `argv[0]`: a symlink
+/// named `claude` starts cam's own executable.
+pub fn started_as(argv0: &OsStr, command: &str) -> bool {
+    is_named(Path::new(argv0), command)
+}
+
 /// Comparing device and inode also catches hard links.
 pub(super) fn same_file_id(a: &Path, b: &Path) -> bool {
     match (fs::metadata(a), fs::metadata(b)) {
@@ -57,8 +63,13 @@ pub(super) fn same_file_id(a: &Path, b: &Path) -> bool {
 }
 
 /// A symlink at `link` to `target`, a file or a folder.
-pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
+pub fn link(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
+}
+
+/// Whether links to files can be made: always.
+pub fn file_links_allowed() -> bool {
+    true
 }
 
 /// A link at `to` with the same target as the link at `from`.

@@ -17,8 +17,8 @@ env:
 
 jobs:
   check:
-    # The check names, macOS and Linux, are what main's ruleset requires.
-    # Windows joins them once Windows is supported (DESIGN.md, Windows).
+    # The check names, macOS, Linux and Windows, are what main's ruleset
+    # requires.
     name: ${{ matrix.name }}
     strategy:
       fail-fast: false

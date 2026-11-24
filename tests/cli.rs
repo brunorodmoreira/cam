@@ -109,7 +109,6 @@ impl Sandbox {
     }
 
     /// The default shim dir under the sandbox's `HOME`.
-    #[cfg(unix)]
     fn shims(&self) -> PathBuf {
         under(&self.home(), ".local/share/cam/shims")
     }
@@ -743,23 +742,36 @@ fn usage_errors_are_redacted() {
 fn add_logs_in_and_records_the_account() {
     let sb = Sandbox::with_config(None);
     sb.fake_claude("bin");
+    // The setup line is for $SHELL, and for PowerShell on Windows, where
+    // it's long enough to go on a line of its own.
+    let next = match cfg!(windows) {
+        false => {
+            "  cam use work            use work in this folder and the ones below it (or pass --dir)\n  \
+                    eval \"$(cam init zsh)\"  at the end of ~/.zshrc, so plain `claude` picks the account\n  \
+                    cam share work          share your settings, CLAUDE.md, skills or history with it\n"
+        }
+        true => concat!(
+            "  cam use work    use work in this folder and the ones below it (or pass --dir)\n",
+            "  Invoke-Expression (& cam init powershell | Out-String)\n",
+            "                  at the end of your PowerShell profile ($PROFILE), so plain `claude` picks the account\n",
+            "  cam share work  share your settings, CLAUDE.md, skills or history with it\n",
+        ),
+    };
     sb.cam(&sb.root)
         .args(["add", "work"])
         .env("SHELL", "/bin/zsh")
         .assert()
         .success()
-        .stdout(
+        .stdout(format!(
             "Login successful.\n\
              added work: logged in as work@example.com (Acme, team)\n\
              \n\
-             Next:\n  \
-               cam use work            use work in this folder and the ones below it (or pass --dir)\n  \
-               eval \"$(cam init zsh)\"  at the end of ~/.zshrc, so plain `claude` picks the account\n  \
-               cam share work          share your settings, CLAUDE.md, skills or history with it\n\
+             Next:\n\
+             {next}\
              \n\
              work starts with an empty Claude Code setup of its own.\n\
              Its first session shows the first-run screens, without your settings, CLAUDE.md, skills or MCP servers.\n",
-        )
+        ))
         .stderr(LOGGING_WORK);
     assert_eq!(read(&sb.config), "[accounts.work]\n");
     let dir = sb.account_dir("work");
@@ -1910,6 +1922,141 @@ fn init_never_replaces_a_claude_that_isnt_cams() {
     assert!(!code.contains("PATH"), "{code}");
     assert_eq!(zsh_completions(&code), code);
     assert_eq!(fs::read(&claude).unwrap(), before);
+}
+
+#[cfg(windows)]
+#[test]
+fn init_for_powershell_copies_cam_and_puts_its_dir_first() {
+    let sb = Sandbox::new();
+    let assert = sb
+        .cam(&sb.root)
+        .args(["init", "powershell"])
+        .assert()
+        .success()
+        .stderr("");
+    let code = stdout_of(&assert);
+    assert!(
+        code.starts_with(&format!(
+            "$env:PATH = '{};{}'\n",
+            sb.shims().display(),
+            sb.bin().display()
+        )),
+        "{code}"
+    );
+    assert!(code.contains("Register-ArgumentCompleter"), "{code}");
+    // A copy, so `cam.exe` itself is never locked by a running session.
+    let shim = sb.shims().join("claude.exe");
+    assert_eq!(fs::read(&shim).unwrap(), fs::read(CAM).unwrap());
+    // At the next shell start, the copy is current and stays as it is.
+    let written = fs::metadata(&shim).unwrap().modified().unwrap();
+    sb.cam(&sb.root)
+        .args(["init", "powershell"])
+        .assert()
+        .success()
+        .stderr("");
+    assert_eq!(fs::metadata(&shim).unwrap().modified().unwrap(), written);
+}
+
+#[cfg(windows)]
+#[test]
+fn plain_claude_runs_with_the_account_through_the_copy() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["init", "powershell"])
+        .assert()
+        .success();
+    let work = sb.logged_in("work", "you@company.com");
+    sb.marker("work", "work\n");
+    let shim = sb.shims().join("claude.exe");
+    let path = sb.path(&[&sb.shims(), &sb.bin()]);
+    // Every argument reaches claude, even ones cam would otherwise parse.
+    sb.command(&shim, &sb.dir("work/repo"))
+        .args(["--help", "exec", "-p", "hi there"])
+        .env("PATH", &path)
+        .assert()
+        .success()
+        .stdout(launched(
+            &claude,
+            " [--help] [exec] [-p] [hi there]",
+            &work.display().to_string(),
+            "work",
+            1,
+        ))
+        .stderr("");
+    // `claude`'s exit code comes back through cam.
+    sb.command(&shim, &sb.root)
+        .env("PATH", &path)
+        .env("FAKE_EXIT", "3")
+        .assert()
+        .code(3);
+    let doctor = sb.cam(&sb.root).arg("doctor").env("PATH", &path).assert();
+    let out = stdout_of(&doctor);
+    assert!(
+        out.contains(&format!(
+            "path: plain `claude` runs through cam ({})",
+            shim.display()
+        )),
+        "{out}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn init_never_replaces_a_claude_exe_that_isnt_cams() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("home/.local/share/cam/shims");
+    let before = fs::read(&claude).unwrap();
+    let assert = sb
+        .cam(&sb.root)
+        .args(["init", "powershell"])
+        .assert()
+        .success()
+        .stderr(format!(
+            "cam: warning: {} already exists and isn't a copy of cam, so cam leaves it alone\n\
+             hint: plain `claude` can't go through cam until you move it away\n",
+            claude.display()
+        ));
+    assert!(!stdout_of(&assert).contains("$env:PATH"));
+    assert_eq!(fs::read(&claude).unwrap(), before);
+}
+
+#[cfg(windows)]
+#[test]
+fn init_on_windows_sets_up_powershell_only() {
+    let sb = Sandbox::new();
+    let assert = sb
+        .cam(&sb.root)
+        .args(["init", "bash"])
+        .assert()
+        .success()
+        .stderr(
+            "cam: warning: on Windows, plain `claude` goes through cam from PowerShell: put `Invoke-Expression (& cam init powershell | Out-String)` in your PowerShell profile\n",
+        );
+    assert!(!stdout_of(&assert).contains("PATH"));
+    assert!(!sb.shims().exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn remove_never_follows_junctions_out_of_the_dir() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    let keep = sb.claude_file("skills/keep.md", "mine\n");
+    sb.cam(&sb.root)
+        .args(["share", "work", "skills", "--yes"])
+        .assert()
+        .success();
+    // A junction, which Windows counts as a link to a folder.
+    let link = fs::symlink_metadata(dir.join("skills")).unwrap();
+    assert!(link.file_type().is_symlink());
+    sb.cam(&sb.root)
+        .args(["remove", "work", "--yes"])
+        .assert()
+        .success();
+    assert!(!dir.exists());
+    assert_eq!(read(&keep), "mine\n");
 }
 
 #[cfg(unix)]
