@@ -60,3 +60,5 @@ Each account's Claude Code folder is `~/.local/share/cam/accounts/<name>/`.
 | `CAM_ACTIVE_ACCOUNT` | Set by cam in claude's environment: the account in use, for status lines and scripts. |
 
 If `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` is set, Claude Code uses it instead of the login, so `cam exec` warns about it. `ANTHROPIC_API_KEY` is used too once you approve it: Claude Code asks once in an interactive session, and remembers the answer ("Use custom API key" in `/config`), so cam only adds a note. With `-p`, Claude Code uses the key without asking, and cam warns. `cam doctor` also looks for cloud-provider switches and `apiKeyHelper`, in the environment and in Claude Code's settings files.
+
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, an undocumented Claude Code variable, gets a warning too, even when it's empty. When it's set, Claude Code stores every account's login in the same place, so whichever account logged in last is the one every account uses.

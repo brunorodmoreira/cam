@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::conflict::{CLOUD, Conflict, is_truthy};
+use crate::conflict::{CLOUD, Conflict, SHARED_STORE, is_truthy};
 use crate::discover::same_file;
 use crate::launch::{ENV_OAUTH_TOKEN, OUTRANKING};
 
@@ -119,6 +119,10 @@ pub fn scan(text: &str, scope: Scope) -> Result<Vec<Conflict>, serde_json::Error
             found.push(Conflict::Credential(var));
         }
     }
+    // Even an empty value counts, as in the environment.
+    if value(SHARED_STORE).is_some() {
+        found.push(Conflict::SharedStore);
+    }
     Ok(found)
 }
 
@@ -148,6 +152,7 @@ mod tests {
                 "ANTHROPIC_AUTH_TOKEN": "",
                 "ANTHROPIC_API_KEY": "x",
                 "CLAUDE_CODE_OAUTH_TOKEN": "x",
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR": "",
                 "OTHER": "x"
             }
         }"#;
@@ -159,17 +164,19 @@ mod tests {
             var: "CLAUDE_CODE_USE_FOUNDRY",
             provider: "Microsoft Foundry",
         };
-        let common = vec![
+        let common = [
             Conflict::ApiKeyHelper,
             vertex,
             foundry,
             Conflict::Credential("ANTHROPIC_API_KEY"),
         ];
-        let mut user = common.clone();
-        user.push(Conflict::Credential("CLAUDE_CODE_OAUTH_TOKEN"));
+        let oauth = Conflict::Credential("CLAUDE_CODE_OAUTH_TOKEN");
+        let shared = Conflict::SharedStore;
+        let user = [&common[..], &[oauth, shared.clone()]].concat();
         assert_eq!(scan(text, Scope::User).unwrap(), user);
         // Project files can't set the token.
-        assert_eq!(scan(text, Scope::Project).unwrap(), common);
+        let project = [&common[..], &[shared]].concat();
+        assert_eq!(scan(text, Scope::Project).unwrap(), project);
     }
 
     #[test]
