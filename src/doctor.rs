@@ -427,10 +427,14 @@ pub fn environment(get: impl Fn(&str) -> Option<OsString>) -> Vec<Check> {
     let mut checks: Vec<Check> = conflict::in_env(&get)
         .into_iter()
         .map(|conflict| {
+            let hint = match conflict {
+                conflict::Conflict::SharedStore => "unset it, so each account keeps its own login",
+                _ => "unset it to use the account cam picks",
+            };
             Check::new(
                 Status::Warn,
                 format!(
-                    "environment: {} is set, so {}\nhint: unset it to use the account cam picks",
+                    "environment: {} is set, so {}\nhint: {hint}",
                     conflict.name(),
                     conflict.effect()
                 ),
@@ -788,6 +792,17 @@ mod tests {
             exported[0].message.contains("exported as /elsewhere"),
             "{}",
             exported[0].message
+        );
+
+        let shared = environment(env(&[("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")]));
+        assert_eq!(
+            shared,
+            [Check::new(
+                Status::Warn,
+                "environment: CLAUDE_SECURESTORAGE_CONFIG_DIR is set, so every account keeps its login \
+                 in the same place, and the last one logged in is used\n\
+                 hint: unset it, so each account keeps its own login"
+            )]
         );
     }
 

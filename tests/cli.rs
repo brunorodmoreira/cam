@@ -1498,6 +1498,25 @@ fn exec_warns_about_variables_that_outrank_the_login() {
 }
 
 #[test]
+fn exec_warns_when_every_account_shares_one_login_slot() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    let work = sb.logged_in("work", "you@company.com");
+    // Claude Code reacts to it even when it's empty.
+    sb.cam(&sb.root)
+        .arg("exec")
+        .env("CAM_ACCOUNT", "work")
+        .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+        .assert()
+        .success()
+        .stdout(launched(&claude, "", &work.display().to_string(), "work", 1))
+        .stderr(
+            "warning: CLAUDE_SECURESTORAGE_CONFIG_DIR is set, so every account keeps its login in the same \
+             place, and the last one logged in is used; unset it, so \"work\" keeps its own login\n",
+        );
+}
+
+#[test]
 fn exec_in_print_mode_warns_about_an_api_key() {
     let sb = Sandbox::new();
     sb.fake_claude("bin");

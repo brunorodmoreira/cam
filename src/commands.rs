@@ -319,8 +319,15 @@ fn print_mode(args: &[OsString]) -> bool {
 /// Tells about each variable set in this shell that outranks a login.
 /// Claude Code asks once whether to use `ANTHROPIC_API_KEY` in an
 /// interactive session, so that one is only a note there; with `-p` it's
-/// used without asking. The others are always used.
+/// used without asking. The others are always used. Also warns about
+/// [`conflict::SHARED_STORE`], which puts every account's login in one place.
 fn warn_outranking(name: &str, print_mode: bool) {
+    if env::var_os(conflict::SHARED_STORE).is_some() {
+        warn(format_args!(
+            "{} is set, so every account keeps its login in the same place, and the last one logged in is used; unset it, so \"{name}\" keeps its own login",
+            conflict::SHARED_STORE
+        ));
+    }
     for var in launch::outranking(|key| env::var_os(key)) {
         if var == launch::ENV_API_KEY && !print_mode {
             note(format_args!(

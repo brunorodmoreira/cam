@@ -5,11 +5,22 @@
 //! settings file's `env` counts too, because Claude Code writes `env`
 //! entries over the inherited environment.
 //!
+//! One more doesn't outrank the login but undoes what keeps the accounts
+//! apart: [`SHARED_STORE`].
+//!
 //! Only names are ever reported, never values: they can be secrets.
 
 use std::ffi::OsString;
 
 use crate::launch;
+
+/// An undocumented Claude Code variable that picks where the login is
+/// stored, in place of `CLAUDE_CONFIG_DIR`: the macOS Keychain entry is
+/// named after it, and elsewhere `.credentials.json` goes in it. Set, even
+/// to an empty value, it gives every account the same login slot, so
+/// whichever logged in last is the one every account uses. (Read in Claude
+/// Code 2.1.331.)
+pub const SHARED_STORE: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
 
 /// The cloud-provider switches and the provider each one selects.
 pub const CLOUD: [(&str, &str); 3] = [
@@ -30,6 +41,8 @@ pub enum Conflict {
     },
     /// `apiKeyHelper` in a settings file.
     ApiKeyHelper,
+    /// [`SHARED_STORE`], set even to an empty value.
+    SharedStore,
 }
 
 impl Conflict {
@@ -38,6 +51,7 @@ impl Conflict {
         match self {
             Self::Credential(var) | Self::Cloud { var, .. } => var,
             Self::ApiKeyHelper => "apiKeyHelper",
+            Self::SharedStore => SHARED_STORE,
         }
     }
 
@@ -49,6 +63,10 @@ impl Conflict {
                 format!("Claude Code uses {provider} instead of the login")
             }
             Self::ApiKeyHelper => "Claude Code uses its key instead of the login".to_owned(),
+            Self::SharedStore => {
+                "every account keeps its login in the same place, and the last one logged in is used"
+                    .to_owned()
+            }
         }
     }
 }
@@ -75,7 +93,8 @@ pub fn in_env(get: impl Fn(&str) -> Option<OsString>) -> Vec<Conflict> {
                 .is_some_and(|value| is_truthy(&value))
         })
         .map(|(var, provider)| Conflict::Cloud { var, provider });
-    clouds.chain(credentials).collect()
+    let shared = get(SHARED_STORE).map(|_| Conflict::SharedStore);
+    clouds.chain(credentials).chain(shared).collect()
 }
 
 #[cfg(test)]
@@ -121,6 +140,21 @@ mod tests {
             ]
         );
         assert!(in_env(env(&[])).is_empty());
+    }
+
+    #[test]
+    fn finds_the_shared_store_even_when_empty() {
+        for value in ["/Users/me/.claude", ""] {
+            assert_eq!(
+                in_env(env(&[("CLAUDE_SECURESTORAGE_CONFIG_DIR", value)])),
+                [Conflict::SharedStore],
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            Conflict::SharedStore.name(),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+        );
     }
 
     #[test]
