@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.2](https://github.com/brunorodmoreira/cam/compare/v0.1.1...v0.1.2) - 2026-11-24
+
+### Dependencies
+
+- *(deps)* bump the cargo group across 1 directory with 4 updates ([#7](https://github.com/brunorodmoreira/cam/pull/7))
+
+### Fixed
+
+- Warn when CLAUDE_SECURESTORAGE_CONFIG_DIR makes every account share one login ([#8](https://github.com/brunorodmoreira/cam/pull/8))
+
 ## [0.1.1](https://github.com/brunorodmoreira/cam/compare/v0.1.0...v0.1.1) - 2026-11-24
 
 ### Other
