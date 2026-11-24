@@ -14,6 +14,11 @@ pub fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
+/// The absolute path with links resolved, as `realpath(3)` gives it.
+pub fn canonicalize(path: &Path) -> io::Result<PathBuf> {
+    fs::canonicalize(path)
+}
+
 /// A builder for folders only their owner can use: mode 0700.
 pub fn private_dir() -> DirBuilder {
     let mut builder = DirBuilder::new();

@@ -16,6 +16,7 @@ use toml_edit::{DocumentMut, Item, Table};
 
 use crate::account::{SYSTEM, is_valid_name};
 use crate::error::Error;
+use crate::platform;
 use crate::share::{self, Group};
 
 pub const ENV_CONFIG: &str = "CAM_CONFIG";
@@ -192,7 +193,7 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), Error> {
         path: path.to_owned(),
         source,
     };
-    let target = match fs::canonicalize(path) {
+    let target = match platform::canonicalize(path) {
         Ok(target) => target,
         Err(err) if err.kind() == io::ErrorKind::NotFound => path.to_owned(),
         Err(err) => return Err(error(err)),
