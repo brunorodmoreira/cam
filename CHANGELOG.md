@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.1](https://github.com/brunorodmoreira/cam/compare/v0.1.0...v0.1.1) - 2026-11-24
+
+### Other
+
+- Shorten the README and move the reference into docs/ ([#3](https://github.com/brunorodmoreira/cam/pull/3))
+- Run macOS CI and the Apple Silicon build on Intel runners ([#4](https://github.com/brunorodmoreira/cam/pull/4))
+- Remove token-mode leftovers, tidy the README, add Dependabot and a security policy ([#1](https://github.com/brunorodmoreira/cam/pull/1))
+- Publish to crates.io from the release workflow
+
 ## [0.1.0](https://github.com/brunorodmoreira/cam/releases/tag/v0.1.0) - 2026-11-23
 
 The first release.
