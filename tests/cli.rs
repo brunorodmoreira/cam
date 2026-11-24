@@ -95,7 +95,7 @@ impl Sandbox {
     /// returns its path.
     fn fake_claude(&self, rel: &str) -> PathBuf {
         let path = self.dir(rel).join(format!("claude{EXE_SUFFIX}"));
-        fs::copy(fake_claude_exe(), &path).unwrap();
+        copy_executable(&fake_claude_exe(), &path);
         path
     }
 
@@ -166,6 +166,25 @@ fn fake_claude_exe() -> PathBuf {
         path.display()
     );
     path
+}
+
+/// Copies an executable so that, once this returns, no process has it open
+/// for writing. With `fs::copy`, another test that starts a process at that
+/// moment hands the open file to it until it execs, and running the copy
+/// then fails on Linux with "Text file busy". `cp` keeps the file open in a
+/// process of its own, which has exited by then.
+fn copy_executable(from: &Path, to: &Path) {
+    #[cfg(unix)]
+    assert!(
+        std::process::Command::new("cp")
+            .arg(from)
+            .arg(to)
+            .status()
+            .unwrap()
+            .success()
+    );
+    #[cfg(windows)]
+    fs::copy(from, to).unwrap();
 }
 
 /// Records a login as the fake `claude` does: the email in `.claude.json`,
@@ -1655,8 +1674,8 @@ fn exec_stops_a_loop_back_to_cam() {
     // other, so each launch starts another, waiting for it, until the depth
     // guard stops the last one. Its exit code comes back through them all.
     let (a, b) = (sb.dir("a"), sb.dir("b"));
-    fs::copy(CAM, a.join("claude.exe")).unwrap();
-    fs::copy(CAM, b.join("claude.exe")).unwrap();
+    copy_executable(Path::new(CAM), &a.join("claude.exe"));
+    copy_executable(Path::new(CAM), &b.join("claude.exe"));
     sb.cam(&sb.root)
         .arg("exec")
         .env("PATH", sb.path(&[&a, &b]))
