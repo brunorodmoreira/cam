@@ -1253,8 +1253,7 @@ pub fn init(shell: Shell, completions: &str) -> Result<()> {
             }
         }
     }
-    code.push_str(&init::completions_code(shell, completions));
-    print!("{}", redact(&code));
+    print!("{}", redact(&init::script(shell, &code, completions)));
     Ok(())
 }
 
