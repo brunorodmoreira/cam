@@ -35,6 +35,8 @@ The squash commit takes the pull request's title, and that title picks the next 
 
 A breaking change is one that can break someone's setup or scripts: a renamed command or flag, a different config format, or output that scripts read. Write the rest of the title for someone reading the changelog. Commits on your branch can say anything.
 
+Claude reviews a pull request once, when it's opened or marked ready, and comments. The review is advisory, and pull requests from forks don't get one.
+
 ## Releasing
 
 For maintainers. [release-plz](https://release-plz.dev) keeps a pull request open titled `chore: release v<version>`. It bumps `version` in `Cargo.toml` and `Cargo.lock`, and adds the release's section to [CHANGELOG.md](CHANGELOG.md), from the titles merged since the last release. It updates itself as more pull requests merge.
