@@ -16,7 +16,8 @@ pub struct Tree {
 impl Tree {
     pub fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(tmp.path()).unwrap();
+        // As cam spells paths: without Windows' `\\?\` prefix.
+        let root = crate::platform::canonicalize(tmp.path()).unwrap();
         Self { _tmp: tmp, root }
     }
 

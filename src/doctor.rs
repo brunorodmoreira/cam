@@ -730,8 +730,8 @@ mod tests {
         assert_eq!(status(Reaches::Nothing, Some(dir)), Status::Warn);
         assert_eq!(status(Reaches::Other(real.clone()), None), Status::Info);
         assert_eq!(status(Reaches::Nothing, None), Status::Info);
-        // The link is joined to the dir, so Windows spells it with `\`.
-        let link = dir.join("claude");
+        // Joined to the dir, so Windows spells it with `\`, as `claude.exe`.
+        let link = dir.join(shim::FILE);
         assert_eq!(
             path(&Reaches::Other(real), Some(dir), zsh).message,
             format!(

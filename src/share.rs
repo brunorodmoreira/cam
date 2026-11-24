@@ -840,7 +840,7 @@ mod tests {
         let (_tree, home, account) = setup();
         top_up(&home, &account, &[Group::Skills]);
         fs::write(home.join(".claude/skills/keep.md"), "mine\n").unwrap();
-        fs::remove_file(account.join("agents")).unwrap();
+        platform::remove_link(&account.join("agents")).unwrap();
         fs::create_dir(account.join("agents")).unwrap();
         let [skills, agents, ..] = SKILLS else {
             unreachable!()
