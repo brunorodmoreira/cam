@@ -13,7 +13,7 @@ cargo fmt
 cargo clippy --all-targets -- -D warnings
 ```
 
-CI runs the same checks on macOS, Linux and Windows for each pull request. macOS and Linux must pass before it merges. Code that differs between Unix and Windows lives in `src/platform/` (see [DESIGN.md](DESIGN.md), Windows), and on Windows the tests need [Developer Mode](https://learn.microsoft.com/windows/apps/get-started/enable-your-device-for-development), for links to files.
+CI runs the same checks on macOS, Linux and Windows for each pull request, and all three must pass before it merges. Code that differs between Unix and Windows lives in `src/platform/` (see [DESIGN.md](DESIGN.md), Windows), and on Windows the tests need [Developer Mode](https://learn.microsoft.com/windows/apps/get-started/enable-your-device-for-development), for links to files.
 
 - **Tests never run the real `claude`** or touch your `~/.claude`, `~/.claude.json` or Keychain. The integration tests in `tests/cli.rs` run cam in a sandbox with its own `HOME`, `PATH` and config, and a fake `claude` (`examples/fake_claude.rs`, which `cargo test` builds) that pretends to log in. Unit tests use temporary folders.
 - **cam never handles a credential.** It only runs `claude auth login`, `auth status --json` and `auth logout`, and nothing it prints may contain a token.
