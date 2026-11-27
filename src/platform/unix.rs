@@ -4,10 +4,12 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
+use std::time::Duration;
 
 /// The home dir: `HOME`, else the user database.
 pub fn home_dir() -> Option<PathBuf> {
@@ -127,6 +129,24 @@ impl Drop for IgnoreInterrupts {
 /// are `claude`'s own. Returns only if that fails.
 pub fn run_instead(mut command: Command) -> io::Error {
     command.exec()
+}
+
+/// A connection to a local socket, such as Herdr's.
+pub type LocalSocket = UnixStream;
+
+/// Connects to the Unix socket at `path`. Each read and write gives up
+/// after `timeout`.
+pub fn connect_local(path: &Path, timeout: Duration) -> io::Result<LocalSocket> {
+    let stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    Ok(stream)
+}
+
+/// Makes `command` start in a process group of its own, so the terminal
+/// neither sends it Ctrl-C nor counts it among its foreground processes.
+pub fn detach(command: &mut Command) -> &mut Command {
+    command.process_group(0)
 }
 
 #[cfg(test)]

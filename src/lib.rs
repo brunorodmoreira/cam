@@ -11,6 +11,7 @@ mod date;
 mod discover;
 mod doctor;
 mod error;
+mod herdr;
 mod init;
 mod launch;
 mod marker;
@@ -28,7 +29,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser, Subcommand, ValueHint};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueHint};
 
 use crate::error::Error;
 use crate::redact::redact;
@@ -226,9 +227,43 @@ enum Command {
     },
 }
 
+// `cam herdr …` is left out of `Cli`, which completions are made from,
+// because clap's scripts list even a hidden command. `parser` adds it.
+/// What cam's Herdr plugin runs. See docs/herdr.md.
+#[derive(Subcommand)]
+enum HerdrCommand {
+    /// The plugin's action: opens the accounts popup in the focused pane's
+    /// folder.
+    Open,
+    /// The accounts popup: which account applies here, and a menu to change
+    /// it, add one, log one in again or check the setup.
+    Accounts,
+}
+
+/// What cam parses: [`Cli`], plus `herdr`, hidden.
+fn parser() -> clap::Command {
+    let herdr = clap::Command::new("herdr")
+        .about("What cam's Herdr plugin runs. See docs/herdr.md")
+        .hide(true)
+        .subcommand_required(true);
+    Cli::command().subcommand(HerdrCommand::augment_subcommands(herdr))
+}
+
+/// A parsed command line.
+enum Parsed {
+    Cli(Command),
+    Herdr(HerdrCommand),
+}
+
 /// Runs the CLI with the process's arguments and environment. Started as
 /// `claude`, through the shim, it's `cam exec` with every argument passed on.
 pub fn run() -> ExitCode {
+    // Before the shim check: the label helper can be started through the
+    // shim, which would otherwise run `claude`.
+    if let Some(job) = herdr::LabelJob::from_env() {
+        job.run();
+        return ExitCode::SUCCESS;
+    }
     let mut args = env::args_os();
     if args
         .next()
@@ -240,8 +275,14 @@ pub fn run() -> ExitCode {
             .and_then(|config| match commands::exec(&args, &config)? {});
         return report(result.map_err(escape_hint));
     }
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
+    let parsed = parser()
+        .try_get_matches()
+        .and_then(|matches| match matches.subcommand() {
+            Some(("herdr", herdr)) => HerdrCommand::from_arg_matches(herdr).map(Parsed::Herdr),
+            _ => Cli::from_arg_matches(&matches).map(|cli| Parsed::Cli(cli.command)),
+        });
+    let parsed = match parsed {
+        Ok(parsed) => parsed,
         // Usage errors can echo arguments back, so redact them too.
         Err(err) if err.use_stderr() => {
             eprint!("{}", redact(&err.render().to_string()));
@@ -249,7 +290,13 @@ pub fn run() -> ExitCode {
         }
         Err(err) => err.exit(),
     };
-    report(dispatch(cli.command))
+    report(match parsed {
+        Parsed::Cli(command) => dispatch(command),
+        Parsed::Herdr(HerdrCommand::Open) => commands::herdr_open(),
+        Parsed::Herdr(HerdrCommand::Accounts) => config_path()
+            .map_err(Into::into)
+            .and_then(|config| commands::herdr_accounts(&config)),
+    })
 }
 
 /// Prints an error, redacted, and picks the exit code.

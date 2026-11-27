@@ -7,9 +7,11 @@ use std::io;
 use std::mem;
 use std::os::windows::fs::FileTypeExt;
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, ExitStatus};
 use std::ptr;
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
@@ -18,6 +20,7 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
+use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
 use windows_sys::core::BOOL;
 
 /// Windows' answer when it won't make a symlink: Developer Mode is off and
@@ -291,6 +294,25 @@ pub fn run_instead(mut command: Command) -> io::Error {
         Ok(status) => process::exit(status.code().unwrap_or(1)),
         Err(err) => err,
     }
+}
+
+/// A connection to a local socket, such as Herdr's: a named pipe.
+pub type LocalSocket = fs::File;
+
+/// Opens the named pipe that stands for the socket file at `path`:
+/// `\\.\pipe\` followed by the whole path, as Herdr names it. A pipe opened
+/// as a file takes no timeout, so `_timeout` is unused: Herdr answers each
+/// request at once, then closes the pipe.
+pub fn connect_local(path: &Path, _timeout: Duration) -> io::Result<LocalSocket> {
+    let mut name = OsString::from(r"\\.\pipe\");
+    name.push(path);
+    OpenOptions::new().read(true).write(true).open(name)
+}
+
+/// Makes `command` start without the console and in a process group of its
+/// own, so Ctrl-C in the console doesn't reach it.
+pub fn detach(command: &mut Command) -> &mut Command {
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
 }
 
 #[cfg(test)]

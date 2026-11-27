@@ -95,6 +95,7 @@ Open a new terminal, and `claude` under `~/Work` runs as `work`, anywhere else a
 - [Using cam](docs/usage.md): adding accounts, folders, plain `claude`, logging in again, checking the setup, the status line, completions and removing an account.
 - [Sharing](docs/sharing.md): which parts of your setup an account can share, and how.
 - [Configuration](docs/configuration.md): how cam picks an account, the marker file, the config file and environment variables.
+- [Herdr](docs/herdr.md): the account on each `claude` in Herdr's sidebar, and a popup to change it.
 - [DESIGN.md](DESIGN.md): the full spec, with what Claude Code was observed to do and the decisions along the way.
 - [CHANGELOG.md](CHANGELOG.md): what changed in each release.
 

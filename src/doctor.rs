@@ -16,6 +16,7 @@ use crate::auth::{self, Expiry};
 use crate::config::Config;
 use crate::conflict;
 use crate::error::Error;
+use crate::herdr;
 use crate::init::{self, Shell};
 use crate::launch::{ENV_ACTIVE, ENV_CONFIG_DIR};
 use crate::resolve::Resolution;
@@ -365,6 +366,19 @@ pub fn links(name: &str, states: &[(Group, Entry, State)], set_aside: &[String])
         )
     }));
     checks
+}
+
+/// An account whose dir lacks Herdr's Claude Code hook, while `~/.claude`
+/// has it. Herdr still finds its `claude`, from the screen.
+pub fn herdr_hook(name: &str, dir: &Path) -> Check {
+    Check::new(
+        Status::Info,
+        format!(
+            "account {name}: Herdr's Claude Code hook isn't in its dir, so Herdr follows its `claude` from the screen alone\n\
+             hint: run `{}`, or share your settings with `cam share {name} settings`",
+            herdr::install_hook_line(dir)
+        ),
+    )
 }
 
 /// Accounts (and `system`) logged in as the same claude.ai account: the

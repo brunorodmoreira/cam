@@ -3189,3 +3189,223 @@ fn completions_offer_the_groups() {
         assert!(fish.contains(expected), "{expected}\n---\n{fish}");
     }
 }
+
+// --- Herdr ---
+
+/// A fake Herdr session: a Unix socket that answers `pane.get` with
+/// `claude` in the pane and the label last reported, and records every
+/// request. Its thread lives as long as the test binary.
+#[cfg(unix)]
+struct FakeHerdr {
+    _dir: TempDir,
+    socket: PathBuf,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+
+#[cfg(unix)]
+impl FakeHerdr {
+    fn start() -> Self {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        // Short, since a socket path is limited to about 100 bytes.
+        let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let socket = dir.path().join("herdr.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        std::thread::spawn(move || {
+            let mut label = serde_json::Value::Null;
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let mut line = String::new();
+                if BufReader::new(&stream).read_line(&mut line).is_err() {
+                    continue;
+                }
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let reply = match request["method"].as_str() {
+                    Some("pane.get") => serde_json::json!({ "id": request["id"], "result": {
+                        "type": "pane_info",
+                        "pane": { "pane_id": request["params"]["pane_id"], "agent": "claude", "display_agent": label },
+                    }}),
+                    Some("pane.report_metadata") => {
+                        label = request["params"]["display_agent"].clone();
+                        serde_json::json!({ "id": request["id"], "result": { "type": "ok" } })
+                    }
+                    _ => {
+                        serde_json::json!({ "id": request["id"], "error": { "code": "unknown", "message": "unknown" } })
+                    }
+                };
+                seen.lock().unwrap().push(request);
+                let _ = (&stream).write_all(format!("{reply}\n").as_bytes());
+            }
+        });
+        Self {
+            _dir: dir,
+            socket,
+            requests,
+        }
+    }
+
+    /// The `pane.report_metadata` requests so far.
+    fn reports(&self) -> Vec<serde_json::Value> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request["method"] == "pane.report_metadata")
+            .cloned()
+            .collect()
+    }
+
+    /// Waits up to 10 s for the first report.
+    fn first_report(&self) -> Option<serde_json::Value> {
+        for _ in 0..100 {
+            if let Some(report) = self.reports().into_iter().next() {
+                return Some(report);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        None
+    }
+
+    /// Whether anything asked Herdr anything within `wait`.
+    fn asked_within(&self, wait: std::time::Duration) -> bool {
+        std::thread::sleep(wait);
+        !self.requests.lock().unwrap().is_empty()
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_in_herdr_labels_the_panes_claude_with_the_account() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    let work = sb.logged_in("work", "you@company.com");
+    sb.marker("work", "work\n");
+    let herdr = FakeHerdr::start();
+    sb.cam(&sb.dir("work"))
+        .arg("exec")
+        .env("HERDR_PANE_ID", "w1:p2")
+        .env("HERDR_SOCKET_PATH", &herdr.socket)
+        .assert()
+        .success()
+        .stdout(launched(
+            &claude,
+            "",
+            &work.display().to_string(),
+            "work",
+            1,
+        ))
+        .stderr("");
+    let report = herdr.first_report().expect("cam labels the pane");
+    assert_eq!(
+        report["params"],
+        serde_json::json!({
+            "pane_id": "w1:p2",
+            "source": "cam",
+            "agent": "claude",
+            "display_agent": "claude · work",
+        })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn plain_claude_in_herdr_labels_the_pane_too() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
+    sb.marker("work", "work\n");
+    let shims = sb.dir("home/.local/share/cam/shims");
+    symlink(CAM, shims.join("claude")).unwrap();
+    let herdr = FakeHerdr::start();
+    // The helper starts from the shim, and must not run `claude` again.
+    sb.command(&shims.join("claude"), &sb.dir("work"))
+        .env("PATH", sb.path(&[&shims, &sb.bin()]))
+        .env("HERDR_PANE_ID", "w1:p1")
+        .env("HERDR_SOCKET_PATH", &herdr.socket)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("account: work\n").count(1));
+    let report = herdr.first_report().expect("cam labels the pane");
+    assert_eq!(report["params"]["display_agent"], "claude · work");
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_in_herdr_leaves_system_and_nested_sessions_unlabeled() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
+    sb.marker("work", "work\n");
+    let system = FakeHerdr::start();
+    sb.cam(&sb.root)
+        .arg("exec")
+        .env("HERDR_PANE_ID", "w1:p1")
+        .env("HERDR_SOCKET_PATH", &system.socket)
+        .assert()
+        .success();
+    let nested = FakeHerdr::start();
+    sb.cam(&sb.dir("work"))
+        .arg("exec")
+        .env("HERDR_PANE_ID", "w1:p1")
+        .env("HERDR_SOCKET_PATH", &nested.socket)
+        .env("CAM_SHIM_DEPTH", "1")
+        .assert()
+        .success();
+    let wait = std::time::Duration::from_secs(1);
+    assert!(!system.asked_within(wait), "system");
+    assert!(!nested.asked_within(wait), "nested");
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_without_herdr_running_still_runs_claude() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    let work = sb.logged_in("work", "you@company.com");
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .arg("exec")
+        .env("HERDR_PANE_ID", "w1:p1")
+        .env("HERDR_SOCKET_PATH", sb.root.join("no-herdr.sock"))
+        .assert()
+        .success()
+        .stdout(launched(
+            &claude,
+            "",
+            &work.display().to_string(),
+            "work",
+            1,
+        ))
+        .stderr("");
+}
+
+#[test]
+fn doctor_notes_an_account_without_herdrs_hook() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    sb.system_login("me@example.com");
+    sb.logged_in("work", "you@company.com");
+    let hooks = sb.dir("home/.claude/hooks");
+    fs::write(hooks.join("herdr-agent-state.sh"), "").unwrap();
+    let personal = sb.logged_in("personal", "me@personal.com");
+    fs::create_dir_all(personal.join("hooks")).unwrap();
+    fs::write(personal.join("hooks").join("herdr-agent-state.sh"), "").unwrap();
+    let output = sb.cam(&sb.root).arg("doctor").output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let work = sb.account_dir("work");
+    assert!(
+        stdout.contains(&format!(
+            "info  account work: Herdr's Claude Code hook isn't in its dir, so Herdr follows its `claude` from the screen alone\n      hint: run `{}`, or share your settings with `cam share work settings`\n",
+            if cfg!(windows) {
+                format!("$env:CLAUDE_CONFIG_DIR = '{}'; herdr integration install claude; Remove-Item env:CLAUDE_CONFIG_DIR", work.display())
+            } else {
+                format!("CLAUDE_CONFIG_DIR='{}' herdr integration install claude", work.display())
+            }
+        )),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("account personal: Herdr"), "{stdout}");
+}
