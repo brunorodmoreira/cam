@@ -19,6 +19,7 @@ use crate::date;
 use crate::discover::{self, ENV_CLAUDE_BIN, Search};
 use crate::doctor::{self, Login};
 use crate::error::{Error, Named, unknown_hint};
+use crate::herdr::{self, Herdr};
 use crate::init::{self, Shell};
 use crate::launch::{self, ENV_ACTIVE, ENV_CONFIG_DIR, ENV_DEPTH, Target};
 use crate::marker::{self, FILE_NAME};
@@ -1105,6 +1106,10 @@ pub fn doctor(config_path: &Path) -> Result<()> {
     let system = ask(Target::System);
     note_email(SYSTEM, &system);
     checks.push(doctor::system(&system, today));
+    // Herdr is set up for Claude Code when its hook is in ~/.claude.
+    let herdr_set_up = home
+        .as_deref()
+        .is_some_and(|home| herdr::has_hook(&home.join(".claude")));
     if let (Ok(config), Some(home)) = (&loaded, &home) {
         for name in config.accounts().keys() {
             let dir = account::dir(home, name);
@@ -1119,6 +1124,9 @@ pub fn doctor(config_path: &Path) -> Result<()> {
             if dir_exists {
                 let states = share::states(home, &dir, &config.shares(name));
                 checks.extend(doctor::links(name, &states, &share::set_aside(&dir)));
+                if herdr_set_up && !herdr::has_hook(&dir) {
+                    checks.push(doctor::herdr_hook(name, &dir));
+                }
             }
         }
     }
@@ -1192,6 +1200,13 @@ pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
             Target::Account { name, dir: &dir }
         }
     };
+    // Only the outermost cam labels the pane, so a `claude` that a session
+    // runs doesn't relabel it.
+    if depth == 1
+        && let Selection::Account(name) = &resolution.selection
+    {
+        herdr::start_label(name);
+    }
     let source = platform::run_instead(claude(&program, args, target, depth));
     Err(Error::Exec {
         path: program,
@@ -1309,6 +1324,140 @@ pub fn unuse(dir: Option<&Path>) -> Result<()> {
         }
         Err(err) => Err(err).with_context(|| format!("cannot remove {}", path.display())),
     }
+}
+
+/// `cam herdr open`, the action of cam's Herdr plugin: opens the accounts
+/// popup in the folder of the focused pane, else of the workspace.
+pub fn herdr_open() -> Result<()> {
+    let herdr = Herdr::from_env()
+        .with_context(|| format!("Herdr didn't start this: {} isn't set", herdr::ENV_SOCKET))?;
+    let dir = env::var(herdr::ENV_CONTEXT)
+        .ok()
+        .and_then(|context| herdr::context_dir(&context));
+    let plugin = env::var(herdr::ENV_PLUGIN).unwrap_or_else(|_| herdr::PLUGIN_ID.to_owned());
+    herdr
+        .open_accounts(&plugin, dir.as_deref())
+        .context("cannot open cam's accounts popup")
+}
+
+/// What the accounts popup offers.
+#[derive(Clone, Copy)]
+enum Choice {
+    Use,
+    Unuse,
+    Add,
+    Login,
+    Doctor,
+    Hook,
+    Close,
+}
+
+/// `cam herdr accounts`, the popup of cam's Herdr plugin: which account
+/// applies in the current folder, and a menu to change that, add an
+/// account, log one in again, check the setup, or put Herdr's hook in the
+/// accounts without it. Each choice runs its command's own code, and its
+/// output stays until Enter goes back to the menu. Esc closes.
+pub fn herdr_accounts(config_path: &Path) -> Result<()> {
+    let term = dialoguer::console::Term::stderr();
+    let theme = dialoguer::theme::ColorfulTheme::default();
+    loop {
+        let _ = term.clear_screen();
+        let dir = current_dir()?;
+        tell(format_args!("cam in {}", dir.display()));
+        if let Err(err) = which(config_path) {
+            tell(format_args!("cam: {err:#}"));
+        }
+        tell("");
+
+        let names: Vec<String> = Config::load(config_path)
+            .map(|config| config.accounts().keys().cloned().collect())
+            .unwrap_or_default();
+        let home = home()?;
+        let dirs: Vec<(String, PathBuf)> = names
+            .iter()
+            .map(|name| (name.clone(), account::dir(&home, name)))
+            .collect();
+        let missing: Vec<_> = herdr::missing_hook(&home, &dirs)
+            .into_iter()
+            .map(|(name, dir)| (name.clone(), dir.clone()))
+            .collect();
+
+        let mut choices = vec![(Choice::Use, "Use an account here".to_owned())];
+        if dir.join(FILE_NAME).is_file() {
+            choices.push((Choice::Unuse, format!("Remove this folder's {FILE_NAME}")));
+        }
+        choices.push((Choice::Add, "Add an account".to_owned()));
+        choices.push((Choice::Login, "Log an account in again".to_owned()));
+        choices.push((Choice::Doctor, "Check the setup (cam doctor)".to_owned()));
+        if !missing.is_empty() {
+            let who: Vec<&str> = missing.iter().map(|(name, _)| name.as_str()).collect();
+            choices.push((
+                Choice::Hook,
+                format!("Put Herdr's Claude Code hook in {}", who.join(", ")),
+            ));
+        }
+        choices.push((Choice::Close, "Close".to_owned()));
+        let labels: Vec<&str> = choices.iter().map(|(_, label)| label.as_str()).collect();
+        let picked = dialoguer::Select::with_theme(&theme)
+            .with_prompt("Esc closes")
+            .items(&labels)
+            .default(0)
+            .interact_on_opt(&term)
+            .context("cannot show the menu")?;
+        let Some(index) = picked else {
+            return Ok(());
+        };
+
+        let with_system: Vec<String> = std::iter::once(SYSTEM.to_owned())
+            .chain(names.iter().cloned())
+            .collect();
+        let pick = |prompt: &str| -> Result<Option<String>> {
+            let index = dialoguer::Select::with_theme(&theme)
+                .with_prompt(prompt)
+                .items(&with_system)
+                .default(0)
+                .interact_on_opt(&term)
+                .context("cannot show the accounts")?;
+            Ok(index.map(|index| with_system[index].clone()))
+        };
+        let outcome = match choices[index].0 {
+            Choice::Close => return Ok(()),
+            Choice::Use => pick("Use which account here?")?
+                .map(|name| use_account(&name, Some(&dir), config_path)),
+            Choice::Unuse => Some(unuse(Some(&dir))),
+            Choice::Add => dialoguer::Input::<String>::with_theme(&theme)
+                .with_prompt("The new account's name, like work (Esc goes back)")
+                .allow_empty(true)
+                .interact_text_on(&term)
+                .ok()
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+                .map(|name| add(&name, &[], &[], config_path)),
+            Choice::Login => pick("Log which account in again?")?
+                .map(|name| login(Some(&name), &[], config_path)),
+            Choice::Doctor => Some(doctor(config_path)),
+            Choice::Hook => Some(install_herdr_hooks(&missing)),
+        };
+        let Some(outcome) = outcome else {
+            continue;
+        };
+        if let Err(err) = outcome {
+            tell(format_args!("cam: {err:#}"));
+        }
+        tell("\nEnter goes back to the menu");
+        let _ = term.read_line();
+    }
+}
+
+/// Puts Herdr's Claude Code hook in each of the account dirs in `missing`
+/// (name, dir), with Herdr's own installer.
+fn install_herdr_hooks(missing: &[(String, PathBuf)]) -> Result<()> {
+    for (name, dir) in missing {
+        tell(format_args!("{name}: {}", herdr::install_hook_line(dir)));
+        let status = herdr::install_hook(dir).context("cannot run herdr")?;
+        ensure!(status.success(), "herdr failed for {name}, with {status}");
+    }
+    Ok(())
 }
 
 fn current_dir() -> Result<PathBuf> {

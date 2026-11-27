@@ -14,6 +14,8 @@
 //! - [`IgnoreInterrupts`] and [`describe_exit`]: Ctrl-C and how a child
 //!   ended.
 //! - [`run_instead`]: how `exec` hands over to `claude`.
+//! - [`LocalSocket`], [`connect_local`] and [`detach`]: for Herdr, a Unix
+//!   socket or a named pipe, and a process apart from the terminal.
 
 #[cfg(unix)]
 mod unix;

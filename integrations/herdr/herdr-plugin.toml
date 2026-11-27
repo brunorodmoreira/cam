@@ -1,0 +1,29 @@
+# cam's Herdr plugin: https://github.com/brunorodmoreira/cam/blob/main/docs/herdr.md
+#
+# Install it with `herdr plugin install brunorodmoreira/cam/integrations/herdr`.
+# Nothing is built: the commands run the `cam` on PATH, which needs a version
+# that has `cam herdr` (see docs/herdr.md).
+
+id = "cam"
+name = "cam"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Pick the Claude Code account per folder with cam: see and change it from a popup"
+platforms = ["linux", "macos", "windows"]
+
+# Opens the popup below in the focused pane's folder, else the workspace's.
+# Bind it to a key in config.toml, as docs/herdr.md shows.
+[[actions]]
+id = "accounts"
+title = "cam: accounts"
+description = "Which Claude Code account applies in this folder, and a menu to change it"
+contexts = ["global"]
+command = ["cam", "herdr", "open"]
+
+[[panes]]
+id = "accounts"
+title = "cam accounts"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["cam", "herdr", "accounts"]
