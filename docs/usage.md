@@ -132,7 +132,11 @@ format = "(as [✻ $output]($style) )"
 style = "bold #d77757"
 ```
 
-The prompt then reads `~/Work/api on main as ✻ work`, and shows nothing where `claude` runs as `system`. Change the icon, color and words as you like. Starship's default `format` already includes custom modules. If you've set your own, add `${custom.cam}` where you want it.
+The prompt then reads `~/Work/api on main as ✻ work`, and shows nothing where `claude` runs as `system`:
+
+![In ~/Work/api the prompt ends with "as ✻ work" and claude starts as work; in ~/oss it shows no account and claude starts as system](prompt.gif)
+
+Change the icon, color and words as you like. Starship's default `format` already includes custom modules. If you've set your own, add `${custom.cam}` where you want it.
 
 Other prompts can do the same with the command's output: `$(cam which --short)` in bash or zsh, `(cam which --short)` in fish.
 
