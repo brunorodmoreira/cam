@@ -970,6 +970,26 @@ pub fn which(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What `cam which --short` prints when cam can't tell the account: a
+/// prompt then flags a broken marker or config before `claude` fails on it.
+const SHORT_UNKNOWN: &str = "cam?";
+
+/// `cam which --short`, for a shell prompt: the account's name, nothing for
+/// `system`, and [`SHORT_UNKNOWN`] when the account can't be worked out.
+/// It runs at every prompt, so it never fails and never writes to stderr.
+pub fn which_short(config_path: Option<&Path>) {
+    let resolution = config_path.and_then(|config| {
+        let env_account = resolve::env_account().ok()?;
+        let cwd = env::current_dir().ok()?;
+        resolve::resolve(env_account.as_deref(), &cwd, config).ok()
+    });
+    match resolution.map(|resolution| resolution.selection) {
+        Some(Selection::Account(name)) => say(name),
+        Some(Selection::System) => {}
+        None => say(SHORT_UNKNOWN),
+    }
+}
+
 /// `cam whoami`: the account for this folder, and who Claude Code says it
 /// is logged in as. Asks in the environment `claude` would get, so what
 /// outranks the login shows up as what Claude Code would really use.

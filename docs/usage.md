@@ -117,6 +117,29 @@ cam sets `CAM_ACTIVE_ACCOUNT` in the environment of the `claude` it starts, and 
 
 `system`'s is `~/.claude/settings.json`. An account that shares `settings` uses that same file, so one status line covers them all. Otherwise the account's own is `~/.local/share/cam/accounts/<name>/settings.json`. If you already have a status line script, have it print `${CAM_ACTIVE_ACCOUNT:-system}` too.
 
+## Showing the account in your shell prompt
+
+`cam which --short` prints just the name of the account that `claude` would use here, nothing for `system`, and `cam?` when cam can't tell, such as for a marker that names an unknown account (`cam which` or `cam doctor` says why). It takes a few milliseconds and never prints an error, so a prompt can run it every time.
+
+With [Starship](https://starship.rs), add this to `~/.config/starship.toml`:
+
+```toml
+[custom.cam]
+description = "The Claude Code account that cam picks here"
+command = "cam which --short"
+when = true
+format = "(as [✻ $output]($style) )"
+style = "bold #d77757"
+```
+
+The prompt then reads `~/Work/api on main as ✻ work`, and shows nothing where `claude` runs as `system`:
+
+![In ~/Work/api the prompt ends with "as ✻ work" and claude starts as work; in ~/oss it shows no account and claude starts as system](prompt.gif)
+
+Change the icon, color and words as you like. Starship's default `format` already includes custom modules. If you've set your own, add `${custom.cam}` where you want it.
+
+Other prompts can do the same with the command's output: `$(cam which --short)` in bash or zsh, `(cam which --short)` in fish.
+
 ## Shell completions
 
 `cam init` loads completions with your account names, so `cam use <TAB>` offers them. Accounts you add later show up in new shells. In zsh they need `compinit`, which frameworks like Oh My Zsh run for you: the `cam init` line has to come after it.
