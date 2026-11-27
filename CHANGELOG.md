@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.5](https://github.com/brunorodmoreira/cam/compare/v0.1.4...v0.1.5) - 2026-11-27
+
+### Added
+
+- Show the account on Claude's pane in Herdr, and add a Herdr plugin ([#21](https://github.com/brunorodmoreira/cam/pull/21))
+
+### Documentation
+
+- Record the Windows acceptance run ([#20](https://github.com/brunorodmoreira/cam/pull/20))
+
 ## [0.1.4](https://github.com/brunorodmoreira/cam/compare/v0.1.3...v0.1.4) - 2026-11-24
 
 ### Fixed
