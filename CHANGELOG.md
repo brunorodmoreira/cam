@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.6](https://github.com/brunorodmoreira/cam/compare/v0.1.5...v0.1.6) - 2026-11-27
+
+### Added
+
+- Add cam which --short, to show the account in a shell prompt such as Starship ([#23](https://github.com/brunorodmoreira/cam/pull/23))
+
 ## [0.1.5](https://github.com/brunorodmoreira/cam/compare/v0.1.4...v0.1.5) - 2026-11-27
 
 ### Added
