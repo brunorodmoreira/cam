@@ -167,7 +167,16 @@ enum Command {
         dir: Option<PathBuf>,
     },
     /// Show which account applies here, and why.
-    Which,
+    ///
+    /// With --short, for a shell prompt: only the account's name, nothing
+    /// for `system`, and `cam?` when cam can't tell, such as for a marker
+    /// naming an unknown account. It always succeeds and prints nothing to
+    /// stderr.
+    Which {
+        /// Print only the name, for a shell prompt.
+        #[arg(long)]
+        short: bool,
+    },
     /// Show the account that applies here, and who it's logged in as.
     ///
     /// Asks `claude auth status`, so it reports what Claude Code would use.
@@ -362,7 +371,11 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
         Command::List => commands::list(&config_path()?),
         Command::Use { name, dir } => commands::use_account(&name, dir.as_deref(), &config_path()?),
         Command::Unuse { dir } => commands::unuse(dir.as_deref()),
-        Command::Which => commands::which(&config_path()?),
+        Command::Which { short: false } => commands::which(&config_path()?),
+        Command::Which { short: true } => {
+            commands::which_short(config_path().ok().as_deref());
+            Ok(())
+        }
         Command::Whoami => commands::whoami(&config_path()?),
         Command::Doctor => commands::doctor(&config_path()?),
         Command::Exec { args } => match commands::exec(&args, &config_path()?)? {},

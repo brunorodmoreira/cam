@@ -82,7 +82,7 @@ Open a new terminal, and `claude` under `~/Work` runs as `work`, anywhere else a
 | `cam share <name> [<group>…]` | Share parts of `~/.claude` with an account |
 | `cam unshare <name> <group>…` | Stop sharing them |
 | `cam list` | `system` and the accounts, with the email each is logged in as |
-| `cam which` | The account that applies here, and why |
+| `cam which [--short]` | The account that applies here, and why. `--short` is for your shell prompt |
 | `cam whoami` | Who that account is logged in as |
 | `cam doctor` | Check the setup, the logins and what could get in the way |
 | `cam remove <name>` | Log an account out and delete it |
@@ -92,7 +92,7 @@ Open a new terminal, and `claude` under `~/Work` runs as `work`, anywhere else a
 
 ## Documentation
 
-- [Using cam](docs/usage.md): adding accounts, folders, plain `claude`, logging in again, checking the setup, the status line, completions and removing an account.
+- [Using cam](docs/usage.md): adding accounts, folders, plain `claude`, logging in again, checking the setup, the status line, the shell prompt (Starship), completions and removing an account.
 - [Sharing](docs/sharing.md): which parts of your setup an account can share, and how.
 - [Configuration](docs/configuration.md): how cam picks an account, the marker file, the config file and environment variables.
 - [Herdr](docs/herdr.md): the account on each `claude` in Herdr's sidebar, and a popup to change it.

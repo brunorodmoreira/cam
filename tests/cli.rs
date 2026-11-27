@@ -319,6 +319,59 @@ fn which_suggests_a_close_account_name() {
 }
 
 #[test]
+fn which_short_prints_only_the_account() {
+    let sb = Sandbox::new();
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work/repo"))
+        .args(["which", "--short"])
+        .assert()
+        .success()
+        .stdout("work\n")
+        .stderr("");
+    sb.cam(&sb.dir("work/repo"))
+        .args(["which", "--short"])
+        .env("CAM_ACCOUNT", "personal")
+        .assert()
+        .success()
+        .stdout("personal\n");
+}
+
+#[test]
+fn which_short_prints_nothing_for_system() {
+    let sb = Sandbox::new();
+    sb.marker("work", "work\n");
+    sb.marker("work/oss", "system\n");
+    for dir in ["elsewhere", "work/oss/repo"] {
+        sb.cam(&sb.dir(dir))
+            .args(["which", "--short"])
+            .assert()
+            .success()
+            .stdout("")
+            .stderr("");
+    }
+}
+
+#[test]
+fn which_short_flags_what_it_cannot_tell_quietly() {
+    let sb = Sandbox::new();
+    sb.marker("typo", "wrok\n");
+    sb.cam(&sb.dir("typo"))
+        .args(["which", "--short"])
+        .assert()
+        .success()
+        .stdout("cam?\n")
+        .stderr("");
+    fs::write(&sb.config, "not [toml").unwrap();
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .args(["which", "--short"])
+        .assert()
+        .success()
+        .stdout("cam?\n")
+        .stderr("");
+}
+
+#[test]
 fn which_env_beats_marker() {
     let sb = Sandbox::new();
     sb.marker("work", "work\n");

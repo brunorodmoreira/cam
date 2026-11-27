@@ -153,6 +153,8 @@ system (from /Users/me/Work/oss/.claude-account)
 system (no CAM_ACCOUNT or .claude-account)
 ```
 
+`cam which --short` (2026-11-27) is for a shell prompt, which runs it every time: just the account's name, nothing for `system`, and `cam?` when the resolution fails or the config path can't be found, so a broken marker shows before `claude` fails on it. It always exits 0 and never writes to stderr. docs/usage.md has a Starship custom module for it, which Starship 1.27 rendered as `as ✻ work` in about 6 ms. Starship's `detect_files` looks only in the current directory, while a marker usually sits higher up, so the module runs the command at every prompt (`when = true`) and hides itself on empty output.
+
 ## Commands
 
 | Command | Does |
@@ -164,7 +166,7 @@ system (no CAM_ACCOUNT or .claude-account)
 | `cam list` | `system` and the accounts, with the email each one is logged in as and, from M8, what it shares. |
 | `cam use <name> [--dir <d>]` | Writes `.claude-account` in the current directory (or `<d>`, which must exist), containing just `<name>\n` and replacing any existing marker. Validates that the name exists. `cam use system` needs no account. Says what it replaced (`(work, was personal)`), and notes when the folder is in a git repository. A leading `~` in `<d>` is the home dir, since shells leave it alone in `--dir=~/x`. |
 | `cam unuse [--dir <d>]` | Removes the marker in that folder only, never a parent's. If that folder has none, it exits non-zero and names the nearest parent marker. `~` as for `use`. |
-| `cam which` | Resolved account and its source: env, a file path, or nothing. |
+| `cam which [--short]` | Resolved account and its source: env, a file path, or nothing. `--short` is for a shell prompt (see Resolution). |
 | `cam whoami` | The resolved account and who it's logged in as, from `claude auth status`. |
 | `cam doctor` | Health checks (below). |
 | `cam exec [--] <args…>` | Resolves, then execs the real `claude` with `<args…>` and the account's config dir. |
