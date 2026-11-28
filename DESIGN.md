@@ -348,6 +348,24 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
 - **Where it lives:** in this repo, as one folder, not a monorepo or a repo of its own. The manifest calls `cam herdr …`, so the plugin and the code it runs change in the same pull request. Herdr builds nothing at install time: a plugin in Rust or Go of its own would need that toolchain on every user's machine. `integrations/` is left out of the crate. If the plugin grows a UI of its own or a release pace of its own, it can move to its own repo.
 - **Later:** the account on each workspace row, which needs a long-running plugin process, since tokens don't clear; a way to turn the label off.
 
+## Skill (M12, 2026-11-28)
+
+cam comes with a skill for Claude Code, `skills/cam/SKILL.md`, the common way for a tool to teach agents about itself (Herdr ships one the same way). It covers finding out which account a session or folder uses (`CAM_ACTIVE_ACCOUNT`, `which`, `whoami`, `list`, `doctor`), markers and `CAM_ACCOUNT`, the groups and what sharing does both ways, and what to leave to the user: `add` and `login` open a browser, `remove` deletes, and `share --yes` moves files aside. It also says never to read `.claude.json`, credential files or Keychain items, and never to switch accounts by setting `CLAUDE_CONFIG_DIR`.
+
+- **Two ways in, from one file:**
+  - `npx skills add brunorodmoreira/cam` ([vercel-labs/skills](https://github.com/vercel-labs/skills)) finds it at `skills/<name>/SKILL.md` and installs it for Claude Code and other agents. With `-g -a claude-code` it lands in `~/.claude/skills`, which is how `system` gets it. Checked 2026-11-28: `npx skills add <this checkout> --list` found the one skill.
+  - The binary has it built in (`include_str!`), and links it into the accounts.
+- **In accounts:** at each launch (`exec`), `login` and `add`, cam writes the skill to `~/.local/share/cam/skills/cam/SKILL.md` if that copy is missing or from another version, through a temp file and a rename, then links `skills/cam` in the account's own `skills/` folder to that folder, creating `skills/` if needed. So the skill always matches the cam that runs, which `npx skills` can't promise.
+  - A launch only adds the link. Anything at `skills/cam` that isn't cam's link, such as a skill of the account's own named `cam`, is left alone, and so is a `skills/` that is a link.
+  - An account that shares `skills` gets nothing from cam: its `skills/` is `~/.claude/skills`, where cam never writes. A launch removes a cam link left from before it shared, before it makes the share links, so a `skills/` that held only cam's link is gone in time for the shared one in the same launch.
+  - `skill = false`, a top-level key of the config, turns it off. The next launch removes cam's link, and the `skills/` folder too if that leaves it empty, so turning it off leaves the account as it would have been.
+  - Problems are warnings at launch, like the share links.
+- **`share`:** before sharing `skills`, a `skills/` that holds only cam's link counts as cam's, not the account's own: `share` removes it instead of asking to move it aside. When it holds more, cam's link is removed first, so the copy moved aside is only the account's own. Anything still in the way of a link after that appeared in the meantime, and `share` fails without recording the groups. After `unshare`, the next launch links the skill again.
+- **Line endings:** `.gitattributes` keeps `skills/` LF on every checkout, so the skill built into the Windows binary is the same as everywhere else.
+- **`doctor`** is quiet when the skill is linked or the next launch links it. It's `info` when an account shares `skills` and `~/.claude/skills` has no `cam`, with the `npx skills` line, and when an account's own `skills/cam` or a linked `skills/` keeps cam's out.
+- **Rejected:** `claude --plugin-dir`, which loads a plugin for one session and writes nothing. cam would have to add it to every `claude` it starts, `claude auth` and `claude mcp` included, and a plugin's skill is namespaced, so it would be `/cam:cam`. Also rejected: writing the skill as a real folder into each account, since cam couldn't then tell its own copy from a skill of the account's own with the same name.
+- **Not tried yet:** a real session in an account, with the link in place *(verify)*. Claude Code loads skills from a linked folder in `~/.claude/skills`, which is how `npx skills` installs them, and an account's `skills/` is the same folder of the config dir.
+
 ## Storage
 
 - **Config:** `$CAM_CONFIG`, else `~/.config/cam/config.toml`. It contains no secrets.
@@ -361,6 +379,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
   - A missing file is an empty config: no accounts.
   - The config is **validated strictly** every time it's read. Unknown keys are errors, so a typo is never silently ignored. Account names follow the name rule and can't be `system`.
   - An account table has one key, `share`, the groups the account shares (see Sharing), added in M8. A missing `share` means none, and an unknown group is an error, like any unknown key.
+  - At the top, `skill = false` stops cam from linking its skill into the accounts (see Skill, M12). Missing means true.
 - **Account dirs:** `~/.local/share/cam/accounts/<name>/`, built from the home dir and always spelled the same way, because the credential slot is keyed to the spelling.
 - **Credentials:** Claude Code's own. cam never reads, writes or lists them. It only runs `claude auth login`, `logout` and `status`.
 
@@ -421,6 +440,7 @@ Via `toml_edit`, so comments and formatting survive. cam refuses to edit a confi
    - Release notes from `CHANGELOG.md`. Linux ships although no real Claude Code session has been tried there, which the README says.
 10. **Windows (done 2026-11-24, accepted on Windows Server 2025):** see Windows.
 11. **Herdr (prototype, 2026-11-27):** the pane label, the plugin with its accounts popup, and `doctor`'s hook check. See Herdr.
+12. **Skill (2026-11-28):** `skills/cam/SKILL.md` for `npx skills`, built into the binary and linked into each account that doesn't share `skills`, `skill = false` to turn it off, `share` removing cam's link, and `doctor`'s notes. See Skill.
 
 Later ideas: Linux (the design no longer needs a secret store, and the whole test suite passes on Debian, run by CI too, but no real session has been tried *(verify)*), and a check of IDE extensions (they may bundle their own CLI and bypass the PATH shim *(verify)*).
 

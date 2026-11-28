@@ -26,6 +26,8 @@ pub const ENV_CONFIG: &str = "CAM_CONFIG";
 pub struct Config {
     #[serde(default)]
     accounts: BTreeMap<String, Account>,
+    /// Whether accounts get cam's own skill. Missing means they do.
+    skill: Option<bool>,
 }
 
 /// An account's settings: what it shares with `~/.claude`.
@@ -90,6 +92,12 @@ impl Config {
 
     pub fn accounts(&self) -> &BTreeMap<String, Account> {
         &self.accounts
+    }
+
+    /// Whether accounts get cam's skill (see DESIGN.md, Skill): yes, unless
+    /// `skill = false`.
+    pub fn skill(&self) -> bool {
+        self.skill.unwrap_or(true)
     }
 
     /// The groups `name` shares, in table order. None for an unknown name.
@@ -279,6 +287,22 @@ mod tests {
         );
         assert!(matches!(
             parse("[accounts.work]\nshare = \"settings\"\n"),
+            Err(Error::ParseConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn the_skill_is_on_unless_turned_off() {
+        assert!(parse("").unwrap().skill());
+        assert!(parse("skill = true\n[accounts.work]\n").unwrap().skill());
+        assert!(!parse("skill = false\n[accounts.work]\n").unwrap().skill());
+        assert!(matches!(
+            parse("skill = \"no\"\n"),
+            Err(Error::ParseConfig { .. })
+        ));
+        // It's for every account, not one.
+        assert!(matches!(
+            parse("[accounts.work]\nskill = false\n"),
             Err(Error::ParseConfig { .. })
         ));
     }

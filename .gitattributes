@@ -1,0 +1,3 @@
+# cam builds the skill into its binary: LF on every checkout, Windows
+# included, so every platform's cam has the same skill.
+skills/** text eol=lf

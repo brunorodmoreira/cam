@@ -17,6 +17,7 @@ Put a `.claude-account` file in a folder, and `claude` starts with that account 
 - **Plain `claude`.** One line in your shell's startup file, and `claude` picks the account wherever you start it. No `cd` hook.
 - **Share what you want.** An account can share your settings, CLAUDE.md, skills or history with your own setup, or nothing at all.
 - **It explains itself.** `cam which` says which account applies and why, `cam whoami` who it's logged in as, and `cam doctor` what could get in the way.
+- **Claude knows it.** Each account gets cam's skill, so a session can tell you which account it runs as and point a folder at another one. For your own login, `npx skills add brunorodmoreira/cam -g -a claude-code`.
 
 ## Install
 
@@ -92,7 +93,7 @@ Open a new terminal, and `claude` under `~/Work` runs as `work`, anywhere else a
 
 ## Documentation
 
-- [Using cam](docs/usage.md): adding accounts, folders, plain `claude`, logging in again, checking the setup, the status line, the shell prompt (Starship), completions and removing an account.
+- [Using cam](docs/usage.md): adding accounts, folders, plain `claude`, logging in again, checking the setup, the status line, the shell prompt (Starship), cam's skill, completions and removing an account.
 - [Sharing](docs/sharing.md): which parts of your setup an account can share, and how.
 - [Configuration](docs/configuration.md): how cam picks an account, the marker file, the config file and environment variables.
 - [Herdr](docs/herdr.md): the account on each `claude` in Herdr's sidebar, and a popup to change it.
@@ -119,7 +120,7 @@ To uninstall:
 
 1. Delete the `cam init` line from your shell's startup file.
 2. Run `cam remove <name>` for each account you don't want to keep. It logs the account out, so its login doesn't stay behind.
-3. Delete `~/.local/share/cam` (the link for plain `claude`, and the accounts' folders) and `~/.config/cam`.
+3. Delete `~/.local/share/cam` (the link for plain `claude`, the accounts' folders and cam's skill) and `~/.config/cam`. If you installed the skill with `npx skills`, `npx skills remove cam -g` removes it.
 4. Uninstall the binary: `brew uninstall cam`, `cargo uninstall cam-cli`, or delete `~/.local/bin/cam` (`cam.exe` on Windows).
 
 `.claude-account` files left in folders do nothing without cam.

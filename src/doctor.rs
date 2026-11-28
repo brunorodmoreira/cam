@@ -23,6 +23,7 @@ use crate::resolve::Resolution;
 use crate::settings::{File, Inspection};
 use crate::share::{self, Entry, Group, State};
 use crate::shim::{self, Reaches};
+use crate::skill;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -379,6 +380,38 @@ pub fn herdr_hook(name: &str, dir: &Path) -> Check {
             herdr::install_hook_line(dir)
         ),
     )
+}
+
+/// cam's skill in account `name`, when the config wants it there: why a
+/// session in the account doesn't get it from cam, if it doesn't.
+pub fn skill(
+    name: &str,
+    state: &skill::State,
+    shares_skills: bool,
+    in_claude: bool,
+) -> Option<Check> {
+    let subject = format!("account {name}");
+    let leaves = |what: &str| {
+        Check::new(
+            Status::Info,
+            format!("{subject}: {what}, so cam doesn't link its skill there"),
+        )
+    };
+    match state {
+        _ if shares_skills => (!in_claude).then(|| {
+            Check::new(
+                Status::Info,
+                format!(
+                    "{subject}: shares ~/.claude/skills, which has no cam skill, so its sessions go without it\n\
+                     hint: run `{}` to add it there",
+                    skill::INSTALL
+                ),
+            )
+        }),
+        skill::State::Linked | skill::State::Missing => None,
+        skill::State::SharedFolder => Some(leaves("its skills/ is a link")),
+        skill::State::Own => Some(leaves("its skills/cam is its own")),
+    }
 }
 
 /// Accounts (and `system`) logged in as the same claude.ai account: the

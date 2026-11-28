@@ -18,7 +18,7 @@ use crate::platform;
 
 /// Claude Code's own setup, under the home dir. Accounts share from here,
 /// even when the user exports `CLAUDE_CONFIG_DIR` (see DESIGN.md).
-const SHARED_DIR: &str = ".claude";
+pub const SHARED_DIR: &str = ".claude";
 
 /// A part of `~/.claude` that an account shares or doesn't, as a whole.
 /// Claude Code keeps some things together, such as plugins and the
@@ -336,7 +336,7 @@ pub fn state(home: &Path, account_dir: &Path, entry: Entry) -> State {
 }
 
 /// Whether two paths lead to the same existing file or folder.
-fn same_place(a: &Path, b: &Path) -> bool {
+pub fn same_place(a: &Path, b: &Path) -> bool {
     matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
