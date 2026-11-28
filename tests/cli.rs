@@ -3462,3 +3462,185 @@ fn doctor_notes_an_account_without_herdrs_hook() {
     );
     assert!(!stdout.contains("account personal: Herdr"), "{stdout}");
 }
+
+// --- cam's skill ---
+
+/// The skill, as `npx skills add` finds it in the repo.
+const SKILL: &str = include_str!("../skills/cam/SKILL.md");
+
+/// Whether `path` is a link: a symlink, or a junction on Windows.
+fn is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// Whether anything is at `path`, a link included.
+fn exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+/// cam's copy of the skill, which accounts link to.
+fn skill_source(sb: &Sandbox) -> PathBuf {
+    under(&sb.home(), ".local/share/cam/skills/cam")
+}
+
+/// The entries of `dir` whose names start with `prefix`.
+fn entries_starting(dir: &Path, prefix: &str) -> Vec<PathBuf> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(prefix)
+        })
+        .collect()
+}
+
+#[test]
+fn exec_links_cams_skill_into_the_account() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .arg("exec")
+        .assert()
+        .success()
+        .stdout(launched(&claude, "", &dir.display().to_string(), "work", 1))
+        .stderr("");
+    let link = dir.join("skills").join("cam");
+    assert!(is_link(&link));
+    assert_eq!(
+        fs::canonicalize(&link).unwrap(),
+        fs::canonicalize(skill_source(&sb)).unwrap()
+    );
+    assert_eq!(read(&link.join("SKILL.md")), SKILL);
+    // Claude Code's own setup is untouched.
+    assert!(!exists(&sb.claude_dir("")));
+}
+
+#[test]
+fn add_links_cams_skill_unless_the_account_shares_skills() {
+    let sb = Sandbox::with_config(None);
+    sb.fake_claude("bin");
+    sb.cam(&sb.root)
+        .args(["add", "work", "--share", "none"])
+        .assert()
+        .success();
+    assert_eq!(
+        read(&sb.account_dir("work").join("skills/cam/SKILL.md")),
+        SKILL
+    );
+    sb.cam(&sb.root)
+        .args(["add", "personal", "--share", "skills"])
+        .assert()
+        .success();
+    assert_linked(&sb, &sb.account_dir("personal"), &SKILLS_LINKS);
+    assert_eq!(fs::read_dir(sb.claude_dir("skills")).unwrap().count(), 0);
+}
+
+#[test]
+fn the_skill_goes_once_the_config_turns_it_off() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root).args(["login", "work"]).assert().success();
+    assert!(is_link(&dir.join("skills").join("cam")));
+    fs::write(&sb.config, format!("skill = false\n\n{CONFIG}")).unwrap();
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .arg("exec")
+        .assert()
+        .success()
+        .stderr("");
+    // The folder cam made goes with the link, and cam's copy stays.
+    assert!(!exists(&dir.join("skills")));
+    assert_eq!(read(&skill_source(&sb).join("SKILL.md")), SKILL);
+}
+
+#[test]
+fn sharing_skills_replaces_cams_skill_without_asking() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root).args(["login", "work"]).assert().success();
+    // No terminal and no --yes: a skills/ holding only cam's skill isn't
+    // the account's own, so nothing is in the way.
+    sb.cam(&sb.root)
+        .args(["share", "work", "skills"])
+        .assert()
+        .success()
+        .stdout("work now shares skills with ~/.claude\n")
+        .stderr("");
+    assert_linked(&sb, &dir, &SKILLS_LINKS);
+    assert!(entries_starting(&dir, "skills.before-share-").is_empty());
+    assert_eq!(fs::read_dir(sb.claude_dir("skills")).unwrap().count(), 0);
+    // Once it stops sharing, the next launch links cam's skill again.
+    sb.cam(&sb.root)
+        .args(["unshare", "work", "skills"])
+        .assert()
+        .success();
+    sb.cam(&sb.root).args(["login", "work"]).assert().success();
+    assert!(is_link(&dir.join("skills").join("cam")));
+}
+
+#[test]
+fn sharing_skills_moves_the_accounts_own_skills_aside_without_cams() {
+    let sb = Sandbox::new();
+    sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    let review = dir.join("skills").join("review");
+    fs::create_dir_all(&review).unwrap();
+    fs::write(review.join("SKILL.md"), "mine\n").unwrap();
+    sb.cam(&sb.root).args(["login", "work"]).assert().success();
+    assert!(is_link(&dir.join("skills").join("cam")));
+    sb.cam(&sb.root)
+        .args(["share", "work", "skills", "--yes"])
+        .assert()
+        .success();
+    let aside = entries_starting(&dir, "skills.before-share-");
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert_eq!(read(&aside[0].join("review").join("SKILL.md")), "mine\n");
+    assert!(!exists(&aside[0].join("cam")));
+    assert_linked(&sb, &dir, &["skills"]);
+}
+
+#[test]
+fn doctor_notes_where_cams_skill_is_missing() {
+    let sb = Sandbox::with_config(Some(
+        "[accounts.work]\nshare = [\"skills\"]\n\n[accounts.personal]\n",
+    ));
+    sb.fake_claude("bin");
+    sb.logged_in("work", "you@company.com");
+    let personal = sb.logged_in("personal", "me@home.org");
+    let own = personal.join("skills").join("cam");
+    fs::create_dir_all(&own).unwrap();
+    fs::write(own.join("SKILL.md"), "mine\n").unwrap();
+    let doctor = || {
+        let output = sb.cam(&sb.root).arg("doctor").output().unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let shared = "info  account work: shares ~/.claude/skills, which has no cam skill, so its sessions go without it\n      \
+                  hint: run `npx skills add brunorodmoreira/cam -g -a claude-code` to add it there\n";
+    let personal_own =
+        "info  account personal: its skills/cam is its own, so cam doesn't link its skill there\n";
+    let out = doctor();
+    assert!(out.contains(shared) && out.contains(personal_own), "{out}");
+
+    sb.claude_file("skills/cam/SKILL.md", SKILL);
+    let out = doctor();
+    assert!(
+        !out.contains("account work: shares ~/.claude/skills"),
+        "{out}"
+    );
+    assert!(out.contains(personal_own), "{out}");
+
+    fs::write(
+        &sb.config,
+        "skill = false\n\n[accounts.work]\nshare = [\"skills\"]\n\n[accounts.personal]\n",
+    )
+    .unwrap();
+    let out = doctor();
+    assert!(!out.contains("cam doesn't link its skill"), "{out}");
+}

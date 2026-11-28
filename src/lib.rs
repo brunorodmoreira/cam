@@ -21,6 +21,7 @@ mod resolve;
 mod settings;
 mod share;
 mod shim;
+mod skill;
 #[cfg(test)]
 mod testutil;
 

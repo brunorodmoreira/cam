@@ -19,6 +19,8 @@ cam unshare work settings --copy       # stop, and keep a copy of the current fi
 
 Groups go comma-separated or as separate words, and `all` is every group. `cam list` and `cam whoami` show what each account shares.
 
+An account that doesn't share `skills` gets [cam's own skill](usage.md#cams-skill-for-claude-code) in its `skills/` folder. Sharing `skills` replaces that folder with `~/.claude/skills`, which has cam's skill only if you installed it there. When the folder holds nothing but cam's skill, `cam share` just removes it, with nothing to move aside.
+
 Sharing goes both ways, so choose with that in mind. With `settings`, the same hooks and plugins run in both accounts. With `history`, work transcripts and memory sit next to personal ones in `~/.claude/projects`. An org's managed settings and policy caches always stay in its own account.
 
 MCP servers are never shared: Claude Code keeps them in `.claude.json`, next to the login. Add them per account with `CAM_ACCOUNT=work claude mcp add -s user …`, or get them from a plugin in a shared `settings`. Each account also goes through Claude Code's first-run screens once.

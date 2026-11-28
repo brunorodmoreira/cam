@@ -29,6 +29,7 @@ use crate::resolve;
 use crate::settings;
 use crate::share::{self, Group, Parsed, State, Unlinked};
 use crate::shim::{self, Reaches};
+use crate::skill;
 
 /// Prints a line to stdout, redacted like everything else cam prints.
 fn say(line: impl Display) {
@@ -165,6 +166,16 @@ fn top_up_links(name: &str, home: &Path, dir: &Path, groups: &[Group]) {
             entry.name,
             entry.shared_shown()
         ));
+    }
+}
+
+/// Before a launch or a login: links cam's skill into the account, or
+/// removes cam's link once the config turns the skill off or the account
+/// shares `skills`. A problem is a warning, so the launch goes on.
+fn top_up_skill(name: &str, home: &Path, dir: &Path, config: &Config, shares: &[Group]) {
+    let wanted = config.skill() && !shares.contains(&Group::Skills);
+    if let Err(err) = skill::top_up(home, dir, wanted) {
+        warn(format_args!("cannot add cam's skill to {name}: {err}"));
     }
 }
 
@@ -395,6 +406,7 @@ pub fn add(
         let _ = fs::remove_dir_all(&dir);
         return Err(err.context(format!("{name} was not added")));
     }
+    top_up_skill(&name, &home, &dir, &config, &groups);
     let target = Target::Account {
         name: &name,
         dir: &dir,
@@ -538,7 +550,9 @@ pub fn login(name: Option<&str>, login_args: &[OsString], config_path: &Path) ->
     // the other accounts.
     let config = Config::load(config_path).ok();
     if let (Selection::Account(name), Some(dir), Some(config)) = (&selection, &dir, &config) {
-        top_up_links(name, &home, dir, &config.shares(name));
+        let shares = config.shares(name);
+        top_up_links(name, &home, dir, &shares);
+        top_up_skill(name, &home, dir, config, &shares);
     }
     before_login(&selection.to_string(), config.as_ref(), &home);
     let retry = format!("cam login {selection}");
@@ -609,9 +623,14 @@ pub fn share(name: &str, group_args: &[String], yes: bool, config_path: &Path) -
         .filter(|group| !wanted.contains(group))
         .collect();
 
+    let shares_skills = to_link.contains(&Group::Skills);
+    // A skills/ folder that holds only cam's skill is cam's, not the
+    // account's own, so it goes rather than being moved aside.
+    let cams_skills = shares_skills && skill::only_link(&home, &dir);
     let own: Vec<share::Entry> = share::states(&home, &dir, &to_link)
         .into_iter()
         .filter_map(|(_, entry, state)| matches!(state, State::Own(_)).then_some(entry))
+        .filter(|entry| !(cams_skills && entry.name == skill::SKILLS))
         .collect();
     let today = date::today().to_string();
     if !own.is_empty() && !yes {
@@ -631,6 +650,12 @@ pub fn share(name: &str, group_args: &[String], yes: bool, config_path: &Path) -
             ask_yes(&format!("Move {it} aside and share?"))?,
             "nothing changed"
         );
+    }
+    // Shared skills come from ~/.claude, so cam's link goes, and stays out
+    // of what is moved aside.
+    if shares_skills {
+        skill::unlink(&home, &dir)
+            .with_context(|| format!("cannot remove cam's skill from {name}'s skills/"))?;
     }
     let mut moved = Vec::new();
     for entry in own {
@@ -1147,6 +1172,15 @@ pub fn doctor(config_path: &Path) -> Result<()> {
                 if herdr_set_up && !herdr::has_hook(&dir) {
                     checks.push(doctor::herdr_hook(name, &dir));
                 }
+                if config.skill() {
+                    let shares_skills = config.shares(name).contains(&Group::Skills);
+                    checks.extend(doctor::skill(
+                        name,
+                        &skill::state(home, &dir),
+                        shares_skills,
+                        skill::in_claude(home),
+                    ));
+                }
             }
         }
     }
@@ -1212,10 +1246,12 @@ pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
                 }
                 .into());
             }
-            let shares = Config::load(config_path)
-                .map(|config| config.shares(name))
-                .unwrap_or_default();
-            top_up_links(name, &home()?, &dir, &shares);
+            let home = home()?;
+            if let Ok(config) = Config::load(config_path) {
+                let shares = config.shares(name);
+                top_up_links(name, &home, &dir, &shares);
+                top_up_skill(name, &home, &dir, &config, &shares);
+            }
             warn_outranking(name, print_mode(args));
             Target::Account { name, dir: &dir }
         }

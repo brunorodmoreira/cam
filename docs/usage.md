@@ -140,6 +140,20 @@ Change the icon, color and words as you like. Starship's default `format` alread
 
 Other prompts can do the same with the command's output: `$(cam which --short)` in bash or zsh, `(cam which --short)` in fish.
 
+## cam's skill for Claude Code
+
+cam comes with a [skill](https://code.claude.com/docs/en/skills) that tells Claude how to use it: which account a session or a folder uses and why, how to point a folder at another account, what to share, and what to leave to you, such as logging in. Ask a session "which account is this?" or "make ~/Work/client use work", and it answers with cam.
+
+Each account gets it without you doing anything. At each launch, cam links its skill into the account's own `skills/` folder, as `skills/cam`, pointing to a copy in `~/.local/share/cam/skills/cam` that cam rewrites when it changes, so it always matches the cam you run. A skill of the account's own named `cam` is left alone.
+
+cam never writes into `~/.claude`, so `system` doesn't get it from cam, nor does an account that shares `skills`, since its `skills/` is `~/.claude/skills`. Install it there with the [skills](https://github.com/vercel-labs/skills) CLI, which also does it for other coding agents:
+
+```sh
+npx skills add brunorodmoreira/cam -g -a claude-code
+```
+
+To turn the skill off, put `skill = false` at the top of the config file. The next launch of each account removes cam's link.
+
 ## Shell completions
 
 `cam init` loads completions with your account names, so `cam use <TAB>` offers them. Accounts you add later show up in new shells. In zsh they need `compinit`, which frameworks like Oh My Zsh run for you: the `cam init` line has to come after it.

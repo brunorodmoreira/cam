@@ -50,6 +50,8 @@ share = ["settings", "skills"]
 
 Each account's Claude Code folder is `~/.local/share/cam/accounts/<name>/`.
 
+`skill = false`, at the top of the file before any `[accounts.…]` table, stops cam from linking [its skill](usage.md#cams-skill-for-claude-code) into the accounts.
+
 ## Environment variables
 
 | Variable | Meaning |
