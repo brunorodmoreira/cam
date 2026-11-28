@@ -3644,3 +3644,26 @@ fn doctor_notes_where_cams_skill_is_missing() {
     let out = doctor();
     assert!(!out.contains("cam doesn't link its skill"), "{out}");
 }
+
+#[test]
+fn a_launch_that_starts_sharing_skills_links_them_at_once() {
+    let sb = Sandbox::new();
+    let claude = sb.fake_claude("bin");
+    let dir = sb.logged_in("work", "you@company.com");
+    sb.cam(&sb.root).args(["login", "work"]).assert().success();
+    assert!(is_link(&dir.join("skills").join("cam")));
+    // Shared by hand in the config, with cam's skill still in skills/.
+    fs::write(
+        &sb.config,
+        "[accounts.work]\nshare = [\"skills\"]\n\n[accounts.personal]\n",
+    )
+    .unwrap();
+    sb.marker("work", "work\n");
+    sb.cam(&sb.dir("work"))
+        .arg("exec")
+        .assert()
+        .success()
+        .stdout(launched(&claude, "", &dir.display().to_string(), "work", 1))
+        .stderr("");
+    assert_linked(&sb, &dir, &SKILLS_LINKS);
+}

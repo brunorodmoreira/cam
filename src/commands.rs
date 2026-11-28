@@ -551,8 +551,10 @@ pub fn login(name: Option<&str>, login_args: &[OsString], config_path: &Path) ->
     let config = Config::load(config_path).ok();
     if let (Selection::Account(name), Some(dir), Some(config)) = (&selection, &dir, &config) {
         let shares = config.shares(name);
-        top_up_links(name, &home, dir, &shares);
+        // The skill first: a skills/ folder that only held cam's link is
+        // gone before the shared links are made.
         top_up_skill(name, &home, dir, config, &shares);
+        top_up_links(name, &home, dir, &shares);
     }
     before_login(&selection.to_string(), config.as_ref(), &home);
     let retry = format!("cam login {selection}");
@@ -663,7 +665,20 @@ pub fn share(name: &str, group_args: &[String], yes: bool, config_path: &Path) -
             .with_context(|| format!("cannot move {name}'s {} aside", entry.name))?;
         moved.push((entry, to));
     }
-    let linked = link_groups(&home, &dir, &to_link)?.linked;
+    let result = link_groups(&home, &dir, &to_link)?;
+    // Everything of the account's own was moved aside, so anything still in
+    // the way appeared since, such as a skill added to a skills/ folder that
+    // held only cam's link. Then nothing is recorded.
+    if let Some((group, entry, own)) = result.own.first() {
+        bail!(
+            "{name}'s {} is {}, not a link to {}, so {name} doesn't share {group}, and nothing was recorded\n\
+             hint: run `cam share {name} {group}` again to move it aside and link it",
+            entry.name,
+            own.describe(),
+            entry.shared_shown()
+        );
+    }
+    let linked = result.linked;
     let mut unshared = Vec::new();
     for &group in &dropped {
         unshared.extend(unlink_group(&name, &home, &dir, group, false)?);
@@ -1249,8 +1264,9 @@ pub fn exec(args: &[OsString], config_path: &Path) -> Result<Infallible> {
             let home = home()?;
             if let Ok(config) = Config::load(config_path) {
                 let shares = config.shares(name);
-                top_up_links(name, &home, &dir, &shares);
+                // As in `login`, the skill first.
                 top_up_skill(name, &home, &dir, &config, &shares);
+                top_up_links(name, &home, &dir, &shares);
             }
             warn_outranking(name, print_mode(args));
             Target::Account { name, dir: &dir }
