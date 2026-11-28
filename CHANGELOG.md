@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.7](https://github.com/brunorodmoreira/cam/compare/v0.1.6...v0.1.7) - 2026-11-28
+
+### Added
+
+- Add a skill that teaches Claude Code about cam, linked into each account and installable with npx skills ([#25](https://github.com/brunorodmoreira/cam/pull/25))
+
 ## [0.1.6](https://github.com/brunorodmoreira/cam/compare/v0.1.5...v0.1.6) - 2026-11-27
 
 ### Added
